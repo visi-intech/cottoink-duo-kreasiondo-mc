@@ -1,0 +1,123 @@
+<odoo>
+  <data>
+
+    <record id="view_vit_merchandise_category_tree" model="ir.ui.view">
+      <field name="name">vit.merchandise.category.tree</field>
+      <field name="model">vit.merchandise.category</field>
+      <field name="arch" type="xml">
+        <tree string="Merchandise Category">
+          <field name="u_varc"/>
+          <field name="u_vmcc"/>
+          <field name="u_vctn"/>
+          <field name="u_vscn"/>
+          <field name="u_vbrn"/>
+          <field name="u_vcrn"/>
+          <field name="u_vszn"/>
+          <field name="u_vctn_collection" optional="hide"/>
+          <field name="u_vuby" optional="hide"/>
+          <field name="u_vefn" optional="hide"/>
+          <field name="is_integrated" optional="hide"/>
+        </tree>
+      </field>
+    </record>
+
+    <record id="view_vit_merchandise_category_form" model="ir.ui.view">
+      <field name="name">vit.merchandise.category.form</field>
+      <field name="model">vit.merchandise.category</field>
+      <field name="arch" type="xml">
+        <form string="Merchandise Category">
+          <sheet>
+            <widget name="web_ribbon" title="Archived" bg_color="text-bg-danger" invisible="active"/>
+            <field name="active" invisible="1"/>
+            <div class="oe_title">
+              <label for="u_varc"/>
+              <h1><field name="u_varc" placeholder="Artikel Code"/></h1>
+            </div>
+            <group>
+              <group string="Artikel">
+                <field name="u_vszr"/>
+                <field name="u_vmcc"/>
+                <field name="u_vifc"/>
+                <field name="u_vifn"/>
+                <field name="u_vstc"/>
+                <field name="u_vstn"/>
+              </group>
+              <group string="Category &amp; Brand">
+                <field name="u_vctc"/>
+                <field name="u_vctn"/>
+                <field name="u_vscc"/>
+                <field name="u_vscn"/>
+                <field name="u_vbrc"/>
+                <field name="u_vbrn"/>
+                <field name="u_vsbc"/>
+                <field name="u_vsbn"/>
+              </group>
+              <group string="Color, Size &amp; Label">
+                <field name="u_vcrc"/>
+                <field name="u_vcrn"/>
+                <field name="u_vszc"/>
+                <field name="u_vszn"/>
+                <field name="u_vlbc"/>
+                <field name="u_vlbn"/>
+              </group>
+              <group string="Period &amp; Collection">
+                <field name="u_vwkc"/>
+                <field name="u_vwkn"/>
+                <field name="u_vqtc"/>
+                <field name="u_vqtn"/>
+                <field name="u_vctn_collection"/>
+              </group>
+              <group string="Upload Info">
+                <field name="u_vuby"/>
+                <field name="u_vefn"/>
+              </group>
+              <group string="Integration">
+                <field name="is_integrated"/>
+                <field name="index_store" widget="many2many_tags"/>
+              </group>
+            </group>
+          </sheet>
+          <div class="oe_chatter">
+            <field name="message_follower_ids"/>
+            <field name="message_ids"/>
+          </div>
+        </form>
+      </field>
+    </record>
+
+    <record id="view_vit_merchandise_category_search" model="ir.ui.view">
+      <field name="name">vit.merchandise.category.search</field>
+      <field name="model">vit.merchandise.category</field>
+      <field name="arch" type="xml">
+        <search string="Merchandise Category">
+          <field name="u_varc"/>
+          <field name="u_vmcc"/>
+          <field name="u_vctn"/>
+          <field name="u_vbrn"/>
+          <field name="u_vefn"/>
+          <filter name="not_integrated" string="Not Integrated" domain="[('is_integrated', '=', False)]"/>
+          <filter name="archived" string="Archived" domain="[('active', '=', False)]"/>
+          <group expand="0" string="Group By">
+            <filter name="group_category" string="Category" context="{'group_by': 'u_vctn'}"/>
+            <filter name="group_brand" string="Brand" context="{'group_by': 'u_vbrn'}"/>
+            <filter name="group_file" string="Excel FileName" context="{'group_by': 'u_vefn'}"/>
+          </group>
+        </search>
+      </field>
+    </record>
+
+    <record id="action_vit_merchandise_category" model="ir.actions.act_window">
+      <field name="name">Merchandise Category</field>
+      <field name="res_model">vit.merchandise.category</field>
+      <field name="view_mode">tree,form</field>
+      <field name="search_view_id" ref="view_vit_merchandise_category_search"/>
+    </record>
+
+    <menuitem id="menu_vit_merchandise_category"
+              name="Merchandise Category"
+              parent="stock.menu_product_in_config_stock"
+              action="action_vit_merchandise_category"
+              sequence="50"/>
+
+  </data>
+</odoo>
