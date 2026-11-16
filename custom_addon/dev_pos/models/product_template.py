@@ -5,7 +5,7 @@ from odoo.exceptions import ValidationError, UserError
 class VitMerchandiseCategoryMixin(models.AbstractModel):
     """Field Merchandise Category untuk product.template & product.product.
     Data disimpan di master vit.merchandise.category, produk cukup Many2one-nya;
-    field u_* di produk adalah related (stored, readonly) dari master."""
+    field vit_* di produk adalah related (stored, readonly) dari master."""
     _name = 'vit.merchandise.category.mixin'
     _description = 'Merchandise Category Mixin'
 
@@ -15,32 +15,32 @@ class VitMerchandiseCategoryMixin(models.AbstractModel):
     )
 
     # ── Related dari vit.merchandise.category ──────────────
-    u_varc = fields.Char(related='vit_merchandise_category_id.u_varc', string="Artikel Code", store=True)
-    u_vszr = fields.Char(related='vit_merchandise_category_id.u_vszr', string="Size Range", store=True)
-    u_vmcc = fields.Char(related='vit_merchandise_category_id.u_vmcc', string="MC Code", store=True)
-    u_vifc = fields.Char(related='vit_merchandise_category_id.u_vifc', string="Flag Code", store=True)
-    u_vifn = fields.Char(related='vit_merchandise_category_id.u_vifn', string="Flag Name", store=True)
-    u_vstc = fields.Char(related='vit_merchandise_category_id.u_vstc', string="Style Code", store=True)
-    u_vstn = fields.Char(related='vit_merchandise_category_id.u_vstn', string="Style Name", store=True)
-    u_vscc = fields.Char(related='vit_merchandise_category_id.u_vscc', string="Sub Category Code", store=True)
-    u_vscn = fields.Char(related='vit_merchandise_category_id.u_vscn', string="Sub Category Name", store=True)
-    u_vctc = fields.Char(related='vit_merchandise_category_id.u_vctc', string="Category Code", store=True)
-    u_vctn = fields.Char(related='vit_merchandise_category_id.u_vctn', string="Category Name", store=True)
-    u_vsbc = fields.Char(related='vit_merchandise_category_id.u_vsbc', string="Sub Brand Code", store=True)
-    u_vsbn = fields.Char(related='vit_merchandise_category_id.u_vsbn', string="Sub Brand Name", store=True)
-    u_vbrc = fields.Char(related='vit_merchandise_category_id.u_vbrc', string="Brand Code", store=True)
-    u_vbrn = fields.Char(related='vit_merchandise_category_id.u_vbrn', string="Brand Name", store=True)
-    u_vcrc = fields.Char(related='vit_merchandise_category_id.u_vcrc', string="Color Code", store=True)
-    u_vcrn = fields.Char(related='vit_merchandise_category_id.u_vcrn', string="Color Name", store=True)
-    u_vszc = fields.Char(related='vit_merchandise_category_id.u_vszc', string="Size Code", store=True)
-    u_vszn = fields.Char(related='vit_merchandise_category_id.u_vszn', string="Size Name", store=True)
-    u_vlbc = fields.Char(related='vit_merchandise_category_id.u_vlbc', string="Label Code", store=True)
-    u_vlbn = fields.Char(related='vit_merchandise_category_id.u_vlbn', string="Label Name", store=True)
-    u_vwkc = fields.Char(related='vit_merchandise_category_id.u_vwkc', string="Week Code", store=True)
-    u_vwkn = fields.Char(related='vit_merchandise_category_id.u_vwkn', string="Week Name", store=True)
-    u_vqtc = fields.Char(related='vit_merchandise_category_id.u_vqtc', string="Quarter Code", store=True)
-    u_vqtn = fields.Char(related='vit_merchandise_category_id.u_vqtn', string="Quarter Name", store=True)
-    u_vctn_collection = fields.Char(related='vit_merchandise_category_id.u_vctn_collection', string="Collection Name", store=True)
+    vit_artikel_code = fields.Char(related='vit_merchandise_category_id.vit_artikel_code', string="Artikel Code", store=True)
+    vit_size_range = fields.Char(related='vit_merchandise_category_id.vit_size_range', string="Size Range", store=True)
+    vit_mc_code = fields.Char(related='vit_merchandise_category_id.vit_mc_code', string="MC Code", store=True)
+    vit_flag_code = fields.Char(related='vit_merchandise_category_id.vit_flag_code', string="Flag Code", store=True)
+    vit_flag = fields.Char(related='vit_merchandise_category_id.vit_flag', string="Flag Name", store=True)
+    vit_style_code = fields.Char(related='vit_merchandise_category_id.vit_style_code', string="Style Code", store=True)
+    vit_style = fields.Char(related='vit_merchandise_category_id.vit_style', string="Style Name", store=True)
+    vit_sub_category_code = fields.Char(related='vit_merchandise_category_id.vit_sub_category_code', string="Sub Category Code", store=True)
+    vit_sub_category = fields.Char(related='vit_merchandise_category_id.vit_sub_category', string="Sub Category Name", store=True)
+    vit_category_code = fields.Char(related='vit_merchandise_category_id.vit_category_code', string="Category Code", store=True)
+    vit_category = fields.Char(related='vit_merchandise_category_id.vit_category', string="Category Name", store=True)
+    vit_sub_brand_code = fields.Char(related='vit_merchandise_category_id.vit_sub_brand_code', string="Sub Brand Code", store=True)
+    vit_sub_brand = fields.Char(related='vit_merchandise_category_id.vit_sub_brand', string="Sub Brand Name", store=True)
+    vit_brand_code = fields.Char(related='vit_merchandise_category_id.vit_brand_code', string="Brand Code", store=True)
+    vit_brand = fields.Char(related='vit_merchandise_category_id.vit_brand', string="Brand Name", store=True)
+    vit_color_code = fields.Char(related='vit_merchandise_category_id.vit_color_code', string="Color Code", store=True)
+    vit_color = fields.Char(related='vit_merchandise_category_id.vit_color', string="Color Name", store=True)
+    vit_size_code = fields.Char(related='vit_merchandise_category_id.vit_size_code', string="Size Code", store=True)
+    vit_size = fields.Char(related='vit_merchandise_category_id.vit_size', string="Size Name", store=True)
+    vit_label_code = fields.Char(related='vit_merchandise_category_id.vit_label_code', string="Label Code", store=True)
+    vit_label = fields.Char(related='vit_merchandise_category_id.vit_label', string="Label Name", store=True)
+    vit_week_code = fields.Char(related='vit_merchandise_category_id.vit_week_code', string="Week Code", store=True)
+    vit_week = fields.Char(related='vit_merchandise_category_id.vit_week', string="Week Name", store=True)
+    vit_quarter_code = fields.Char(related='vit_merchandise_category_id.vit_quarter_code', string="Quarter Code", store=True)
+    vit_quarter = fields.Char(related='vit_merchandise_category_id.vit_quarter', string="Quarter Name", store=True)
+    vit_collection = fields.Char(related='vit_merchandise_category_id.vit_collection', string="Collection Name", store=True)
 
 
 class ProductTemplate(models.Model):

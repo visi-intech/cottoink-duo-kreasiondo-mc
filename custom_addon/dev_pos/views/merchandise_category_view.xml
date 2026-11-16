@@ -6,16 +6,16 @@
       <field name="model">vit.merchandise.category</field>
       <field name="arch" type="xml">
         <tree string="Merchandise Category">
-          <field name="u_varc"/>
-          <field name="u_vmcc"/>
-          <field name="u_vctn"/>
-          <field name="u_vscn"/>
-          <field name="u_vbrn"/>
-          <field name="u_vcrn"/>
-          <field name="u_vszn"/>
-          <field name="u_vctn_collection" optional="hide"/>
-          <field name="u_vuby" optional="hide"/>
-          <field name="u_vefn" optional="hide"/>
+          <field name="vit_artikel_code"/>
+          <field name="vit_mc_code"/>
+          <field name="vit_category"/>
+          <field name="vit_sub_category"/>
+          <field name="vit_brand"/>
+          <field name="vit_color"/>
+          <field name="vit_size"/>
+          <field name="vit_collection" optional="hide"/>
+          <field name="vit_upload_by" optional="hide"/>
+          <field name="vit_excel_filename" optional="hide"/>
           <field name="is_integrated" optional="hide"/>
         </tree>
       </field>
@@ -35,46 +35,46 @@
             <widget name="web_ribbon" title="Archived" bg_color="text-bg-danger" invisible="active"/>
             <field name="active" invisible="1"/>
             <div class="oe_title">
-              <label for="u_varc"/>
-              <h1><field name="u_varc" placeholder="Artikel Code"/></h1>
+              <label for="vit_artikel_code"/>
+              <h1><field name="vit_artikel_code" placeholder="Artikel Code"/></h1>
             </div>
             <group>
               <group string="Artikel">
-                <field name="u_vszr"/>
-                <field name="u_vmcc"/>
-                <field name="u_vifc"/>
-                <field name="u_vifn"/>
-                <field name="u_vstc"/>
-                <field name="u_vstn"/>
+                <field name="vit_size_range"/>
+                <field name="vit_mc_code"/>
+                <field name="vit_flag_code"/>
+                <field name="vit_flag"/>
+                <field name="vit_style_code"/>
+                <field name="vit_style"/>
               </group>
               <group string="Category &amp; Brand">
-                <field name="u_vctc"/>
-                <field name="u_vctn"/>
-                <field name="u_vscc"/>
-                <field name="u_vscn"/>
-                <field name="u_vbrc"/>
-                <field name="u_vbrn"/>
-                <field name="u_vsbc"/>
-                <field name="u_vsbn"/>
+                <field name="vit_category_code"/>
+                <field name="vit_category"/>
+                <field name="vit_sub_category_code"/>
+                <field name="vit_sub_category"/>
+                <field name="vit_brand_code"/>
+                <field name="vit_brand"/>
+                <field name="vit_sub_brand_code"/>
+                <field name="vit_sub_brand"/>
               </group>
               <group string="Color, Size &amp; Label">
-                <field name="u_vcrc"/>
-                <field name="u_vcrn"/>
-                <field name="u_vszc"/>
-                <field name="u_vszn"/>
-                <field name="u_vlbc"/>
-                <field name="u_vlbn"/>
+                <field name="vit_color_code"/>
+                <field name="vit_color"/>
+                <field name="vit_size_code"/>
+                <field name="vit_size"/>
+                <field name="vit_label_code"/>
+                <field name="vit_label"/>
               </group>
               <group string="Period &amp; Collection">
-                <field name="u_vwkc"/>
-                <field name="u_vwkn"/>
-                <field name="u_vqtc"/>
-                <field name="u_vqtn"/>
-                <field name="u_vctn_collection"/>
+                <field name="vit_week_code"/>
+                <field name="vit_week"/>
+                <field name="vit_quarter_code"/>
+                <field name="vit_quarter"/>
+                <field name="vit_collection"/>
               </group>
               <group string="Upload Info">
-                <field name="u_vuby"/>
-                <field name="u_vefn"/>
+                <field name="vit_upload_by"/>
+                <field name="vit_excel_filename"/>
               </group>
               <group string="Integration">
                 <field name="is_integrated"/>
@@ -95,17 +95,17 @@
       <field name="model">vit.merchandise.category</field>
       <field name="arch" type="xml">
         <search string="Merchandise Category">
-          <field name="u_varc"/>
-          <field name="u_vmcc"/>
-          <field name="u_vctn"/>
-          <field name="u_vbrn"/>
-          <field name="u_vefn"/>
+          <field name="vit_artikel_code"/>
+          <field name="vit_mc_code"/>
+          <field name="vit_category"/>
+          <field name="vit_brand"/>
+          <field name="vit_excel_filename"/>
           <filter name="not_integrated" string="Not Integrated" domain="[('is_integrated', '=', False)]"/>
           <filter name="archived" string="Archived" domain="[('active', '=', False)]"/>
           <group expand="0" string="Group By">
-            <filter name="group_category" string="Category" context="{'group_by': 'u_vctn'}"/>
-            <filter name="group_brand" string="Brand" context="{'group_by': 'u_vbrn'}"/>
-            <filter name="group_file" string="Excel FileName" context="{'group_by': 'u_vefn'}"/>
+            <filter name="group_category" string="Category" context="{'group_by': 'vit_category'}"/>
+            <filter name="group_brand" string="Brand" context="{'group_by': 'vit_brand'}"/>
+            <filter name="group_file" string="Excel FileName" context="{'group_by': 'vit_excel_filename'}"/>
           </group>
         </search>
       </field>

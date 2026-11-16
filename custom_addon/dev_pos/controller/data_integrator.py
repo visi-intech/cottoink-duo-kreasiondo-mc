@@ -26,7 +26,7 @@ class DataIntegrator:
                 'multiple.barcode': 'barcode',
                 'purchase.order': 'vit_trxid',
                 'customer.group': 'vit_group_name',
-                'vit.merchandise.category': 'u_varc',
+                'vit.merchandise.category': 'vit_artikel_code',
             }
             return field_uniq_mapping.get(model, 'name')
         except Exception as e:

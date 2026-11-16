@@ -1,6 +1,6 @@
 {
     'name': 'VIT POS MC',
-    'version': '17.0.1.0.0',
+    'version': '17.0.1.0.1',
     'category': 'Point of Sale',
     'sequence': 1,
     'summary': """Belong to VIT""",

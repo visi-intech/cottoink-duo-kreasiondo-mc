@@ -7,7 +7,7 @@ import json
 import logging
 import base64
 from odoo.exceptions import AccessError
-from ..models.merchandise_category import MERCHANDISE_CATEGORY_FIELDS
+from ..models.merchandise_category import MERCHANDISE_CATEGORY_FIELDS, MERCHANDISE_CATEGORY_LEGACY_KEYS
 
 _logger = logging.getLogger(__name__)
 
@@ -584,8 +584,12 @@ def _bulk_read(model, field, values, fields):
 
 
 def _payload_val(data, field):
-    """Ambil nilai payload dengan key huruf kecil (u_varc) atau huruf besar (U_VARC)."""
-    for key in (field, field.upper()):
+    """Ambil nilai payload dengan nama field (vit_artikel_code) atau key lama SAP (U_VARC / u_varc)."""
+    keys = [field]
+    legacy = MERCHANDISE_CATEGORY_LEGACY_KEYS.get(field)
+    if legacy:
+        keys += [legacy, legacy.lower()]
+    for key in keys:
         if key in data:
             return key, data[key]
     return None, None
@@ -670,7 +674,7 @@ class POSTMasterItem(http.Controller):
                         all_uom_names.add(data[key])
                 all_pos_ids.update(_as_list(data.get('pos_categ_ids', data.get('pos_categ_id', []))))
                 all_tax_names.update(_as_list(data.get('taxes_names', [])))
-                merch_code = _payload_val(data, 'u_varc')[1]
+                merch_code = _payload_val(data, 'vit_artikel_code')[1]
                 if merch_code:
                     all_merch_codes.add(merch_code)
 
@@ -697,12 +701,12 @@ class POSTMasterItem(http.Controller):
             for row in _bulk_read(Tax, 'name', all_tax_names, ['name']):
                 tax_map.setdefault(row['name'], row['id'])
 
-            # Merchandise Category yang sudah ada (termasuk arsip): u_varc -> row
+            # Merchandise Category yang sudah ada (termasuk arsip): vit_artikel_code -> row
             merch_existing = {}
-            for row in _bulk_read(Merch.with_context(active_test=False), 'u_varc',
+            for row in _bulk_read(Merch.with_context(active_test=False), 'vit_artikel_code',
                                   all_merch_codes, MERCHANDISE_CATEGORY_FIELDS):
-                merch_existing.setdefault(row['u_varc'], row)
-            merch_done = {}  # u_varc -> (id, error) ; item pertama di payload yang menentukan
+                merch_existing.setdefault(row['vit_artikel_code'], row)
+            merch_done = {}  # vit_artikel_code -> (id, error) ; item pertama di payload yang menentukan
 
             def upsert_merch(code, data):
                 """Find-or-create vit.merchandise.category dari field u_* di item.
@@ -877,8 +881,8 @@ class POSTMasterItem(http.Controller):
                             vals[field_name] = data[payload_key]
 
                     # Merchandise Category (Many2one): dibentuk/di-update dari field u_* item ini,
-                    # kuncinya Artikel Code (u_varc / U_VARC)
-                    merch_code = _payload_val(data, 'u_varc')[1]
+                    # kuncinya Artikel Code (vit_artikel_code, atau key lama U_VARC)
+                    merch_code = _payload_val(data, 'vit_artikel_code')[1]
                     if merch_code:
                         merch_id, merch_err = upsert_merch(merch_code, data)
                         if merch_err:
