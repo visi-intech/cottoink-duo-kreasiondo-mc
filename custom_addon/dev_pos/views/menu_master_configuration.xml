@@ -6,6 +6,12 @@
     <menuitem id="setting_config_first_level_menu" name="Master Configurasi" parent="setting_config_menu_root"/>
     <!-- Action menu untuk konfigurasi master -->
     <menuitem id="setting_config_model_menu_action" action="master_config_action" parent="setting_config_first_level_menu"/>
+    <!-- Master Merchandise Category -->
+    <menuitem id="menu_vit_merchandise_category"
+              name="Merchandise Category"
+              action="action_vit_merchandise_category"
+              parent="setting_config_first_level_menu"
+              sequence="20"/>
     <!-- Menu sinkronisasi manual -->
     <!-- <menuitem id="synchronize_menu" name="Manual Integration MC to SS" parent="setting_config_menu_root"/> -->
     <!-- Action menu untuk sinkronisasi -->

@@ -27,6 +27,11 @@
       <field name="arch" type="xml">
         <form string="Merchandise Category">
           <sheet>
+            <div class="oe_button_box" name="button_box">
+              <button name="action_view_products" type="object" class="oe_stat_button" icon="fa-cubes">
+                <field name="product_count" widget="statinfo" string="Products"/>
+              </button>
+            </div>
             <widget name="web_ribbon" title="Archived" bg_color="text-bg-danger" invisible="active"/>
             <field name="active" invisible="1"/>
             <div class="oe_title">
@@ -113,11 +118,7 @@
       <field name="search_view_id" ref="view_vit_merchandise_category_search"/>
     </record>
 
-    <menuitem id="menu_vit_merchandise_category"
-              name="Merchandise Category"
-              parent="stock.menu_product_in_config_stock"
-              action="action_vit_merchandise_category"
-              sequence="50"/>
+    <!-- Menu ada di menu_master_configuration.xml (Master Configurasi) -->
 
   </data>
 </odoo>

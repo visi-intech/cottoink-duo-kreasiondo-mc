@@ -64,9 +64,29 @@ class VitMerchandiseCategory(models.Model):
     index_store = fields.Many2many('setting.config', string="Index Store", readonly=True)
     id_mc = fields.Char(string="ID MC", default=False, readonly=True)
 
+    product_count = fields.Integer(string="Products", compute='_compute_product_count')
+
     _sql_constraints = [
         ('u_varc_unique', 'unique(u_varc)', 'Artikel Code (U_VARC) sudah ada!'),
     ]
+
+    def _compute_product_count(self):
+        counts = dict(self.env['product.template']._read_group(
+            [('vit_merchandise_category_id', 'in', self.ids)],
+            ['vit_merchandise_category_id'], ['__count']))
+        for rec in self:
+            rec.product_count = counts.get(rec, 0)
+
+    def action_view_products(self):
+        self.ensure_one()
+        return {
+            'type': 'ir.actions.act_window',
+            'name': _('Products'),
+            'res_model': 'product.template',
+            'view_mode': 'tree,kanban,form',
+            'domain': [('vit_merchandise_category_id', '=', self.id)],
+            'context': {'default_vit_merchandise_category_id': self.id},
+        }
 
     def write(self, vals):
         # Kalau data master berubah, tandai belum terintegrasi supaya ikut sync ulang ke semua store
