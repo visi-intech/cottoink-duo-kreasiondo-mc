@@ -1323,7 +1323,7 @@ class SettingConfig(models.Model):
         for record in self:
             try:
                 # URL dan parameter koneksi API Odoo
-                url = record.vit_config_url
+                url = (record.vit_config_url or '').strip().rstrip('/')
                 db = record.vit_config_db
                 username = record.vit_config_username
                 password = record.vit_config_password
@@ -1369,8 +1369,9 @@ class SettingConfig(models.Model):
                 # record.write({'vit_linked_server': False})
                 # record.write({'vit_state': 'failed'})
                 # return True
-            
-                message = _("Connection failed for %s. Please check your credentials." % record.vit_config_server_name)
+
+                # Tampilkan error asli supaya bisa dibedakan masalah jaringan/VPN vs kredensial
+                message = _("Connection failed for %s: %s") % (record.vit_config_server_name, e)
                 return {'type': 'ir.actions.client',
                             'tag': 'display_notification',
                             'params': {
