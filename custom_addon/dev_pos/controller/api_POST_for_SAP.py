@@ -583,6 +583,14 @@ def _bulk_read(model, field, values, fields):
     return rows
 
 
+def _payload_val(data, field):
+    """Ambil nilai payload dengan key huruf kecil (u_varc) atau huruf besar (U_VARC)."""
+    for key in (field, field.upper()):
+        if key in data:
+            return key, data[key]
+    return None, None
+
+
 def _advisory_lock(cr, key):
     """Transaction-level advisory lock (hash dari key), otomatis lepas saat
     commit/rollback. Mengurangi konflik kalau beberapa request paralel
@@ -606,102 +614,6 @@ def _commit_with_retry(cr, max_retries=COMMIT_MAX_RETRIES, context=""):
                 _logger.error(f"[{context}] Commit gagal setelah {max_retries} retry, menyerah.")
                 raise
             time.sleep(COMMIT_RETRY_BASE_SLEEP * attempt)
-
-
-class POSTMasterMerchandiseCategory(http.Controller):
-
-    @http.route('/api/master_merchandise_category', type='json', auth='none', methods=['POST'], csrf=False)
-    def post_master_merchandise_category(self, **kw):
-        """Upsert master Merchandise Category berdasarkan Artikel Code (u_varc).
-        Payload: {"items": [{"u_varc": "...", "u_vszr": "...", ...}]}
-        Key boleh huruf kecil (u_varc) atau huruf besar sesuai spec (U_VARC).
-        Collection Name memakai key u_vctn_collection / U_VCTN_COLLECTION."""
-        try:
-            config = request.env['setting.config'].sudo().search(
-                [('vit_config_server', '=', 'mc')], limit=1
-            )
-            if not config:
-                return {'code': 500, 'status': 'Failed', 'message': 'Configuration not found.'}
-
-            uid = request.session.authenticate(
-                request.session.db,
-                config.vit_config_username,
-                config.vit_config_password_api
-            )
-            if not uid:
-                return {'code': 401, 'status': 'Failed', 'message': 'Authentication failed.'}
-
-            env = request.env
-            cr = env.cr
-            Merch = env['vit.merchandise.category'].sudo().with_context(
-                active_test=False, tracking_disable=True, mail_create_nolog=True)
-
-            items = request.get_json_data().get('items', [])
-            if isinstance(items, dict):
-                items = [items]
-            if not items:
-                return {'code': 400, 'status': 'Failed', 'message': 'No items provided.'}
-
-            def get_val(data, field):
-                for key in (field, field.upper()):
-                    if key in data:
-                        return key, data[key]
-                return None, None
-
-            codes = {get_val(data, 'u_varc')[1] for data in items} - {None, False, ''}
-            existing = {row['u_varc']: row['id']
-                        for row in _bulk_read(Merch, 'u_varc', codes, ['u_varc'])}
-
-            created, updated, errors = [], [], []
-            seen = set()
-            for data in items:
-                code = get_val(data, 'u_varc')[1]
-                try:
-                    if not code:
-                        errors.append({'id': -1, 'u_varc': None, 'message': "Missing u_varc (Artikel Code)"})
-                        continue
-                    if code in seen:
-                        errors.append({'id': -1, 'u_varc': code, 'message': f"Duplicate u_varc in payload: {code}"})
-                        continue
-                    seen.add(code)
-
-                    vals = {}
-                    for field in MERCHANDISE_CATEGORY_FIELDS:
-                        key, value = get_val(data, field)
-                        if key:
-                            vals[field] = value
-                    if 'active' in data:
-                        vals['active'] = data['active']
-
-                    with cr.savepoint():
-                        if code in existing:
-                            rec = Merch.browse(existing[code])
-                            rec.write(vals)
-                            updated.append({'id': rec.id, 'u_varc': code})
-                        else:
-                            rec = Merch.create(vals)
-                            existing[code] = rec.id
-                            created.append({'id': rec.id, 'u_varc': code})
-                except Exception as e:
-                    errors.append({'id': -1, 'u_varc': code, 'message': str(e)})
-
-            _commit_with_retry(cr, context="merchandise_category_upsert")
-
-            return {
-                'code':          200 if not errors else 207,
-                'status':        'success' if not errors else 'partial_success',
-                'created_items': created,
-                'updated_items': updated,
-                'errors':        errors,
-                'total_created': len(created),
-                'total_updated': len(updated),
-                'total_errors':  len(errors),
-            }
-
-        except Exception as e:
-            request.env.cr.rollback()
-            _logger.error(f"Master Merchandise Category API Fatal Error: {e}", exc_info=True)
-            return {'status': 'Failed', 'code': 500, 'message': str(e)}
 
 
 class POSTMasterItem(http.Controller):
@@ -758,8 +670,9 @@ class POSTMasterItem(http.Controller):
                         all_uom_names.add(data[key])
                 all_pos_ids.update(_as_list(data.get('pos_categ_ids', data.get('pos_categ_id', []))))
                 all_tax_names.update(_as_list(data.get('taxes_names', [])))
-                if data.get('merchandise_category_code'):
-                    all_merch_codes.add(data['merchandise_category_code'])
+                merch_code = _payload_val(data, 'u_varc')[1]
+                if merch_code:
+                    all_merch_codes.add(merch_code)
 
             # ============================================================
             # 2. PRELOAD SEMUA LOOKUP SEKALIGUS (chunked, tanpa query di dalam loop)
@@ -784,9 +697,38 @@ class POSTMasterItem(http.Controller):
             for row in _bulk_read(Tax, 'name', all_tax_names, ['name']):
                 tax_map.setdefault(row['name'], row['id'])
 
-            merch_map = {}   # u_varc -> id
-            for row in _bulk_read(Merch, 'u_varc', all_merch_codes, ['u_varc']):
-                merch_map.setdefault(row['u_varc'], row['id'])
+            # Merchandise Category yang sudah ada (termasuk arsip): u_varc -> row
+            merch_existing = {}
+            for row in _bulk_read(Merch.with_context(active_test=False), 'u_varc',
+                                  all_merch_codes, MERCHANDISE_CATEGORY_FIELDS):
+                merch_existing.setdefault(row['u_varc'], row)
+            merch_done = {}  # u_varc -> (id, error) ; item pertama di payload yang menentukan
+
+            def upsert_merch(code, data):
+                """Find-or-create vit.merchandise.category dari field u_* di item.
+                Kalau sudah ada, hanya field yang dikirim & berbeda yang di-update."""
+                if code in merch_done:
+                    return merch_done[code]
+                vals = {}
+                for field in MERCHANDISE_CATEGORY_FIELDS:
+                    key, value = _payload_val(data, field)
+                    if key:
+                        vals[field] = value
+                try:
+                    with cr.savepoint():
+                        _advisory_lock(cr, f"vit.merchandise.category:{code}")
+                        row = merch_existing.get(code)
+                        if row:
+                            changed = {f: v for f, v in vals.items() if (row.get(f) or False) != (v or False)}
+                            if changed:
+                                Merch.browse(row['id']).write(changed)
+                            result = (row['id'], None)
+                        else:
+                            result = (Merch.create(vals).id, None)
+                except Exception as merch_err:
+                    result = (None, f"Merchandise Category '{code}' failed: {merch_err}")
+                merch_done[code] = result
+                return result
 
             # ============================================================
             # 3. VALIDASI + SIAPKAN VALS (tanpa query), create per batch
@@ -934,13 +876,13 @@ class POSTMasterItem(http.Controller):
                         if payload_key in data:
                             vals[field_name] = data[payload_key]
 
-                    # Merchandise Category (Many2one) -- dicari berdasarkan Artikel Code (U_VARC)
-                    merch_code = data.get('merchandise_category_code')
+                    # Merchandise Category (Many2one): dibentuk/di-update dari field u_* item ini,
+                    # kuncinya Artikel Code (u_varc / U_VARC)
+                    merch_code = _payload_val(data, 'u_varc')[1]
                     if merch_code:
-                        merch_id = merch_map.get(merch_code)
-                        if not merch_id:
-                            errors.append({'id': -1, 'product_code': product_code,
-                                           'message': f"Merchandise Category '{merch_code}' not found."})
+                        merch_id, merch_err = upsert_merch(merch_code, data)
+                        if merch_err:
+                            errors.append({'id': -1, 'product_code': product_code, 'message': merch_err})
                             continue
                         vals['vit_merchandise_category_id'] = merch_id
 

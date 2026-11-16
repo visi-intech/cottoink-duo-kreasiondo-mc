@@ -7,7 +7,7 @@ import pytz
 import re
 import decimal
 from .api_utils import check_authorization, paginate_records, serialize_response, serialize_error_response
-from ..models.merchandise_category import MERCHANDISE_CATEGORY_FIELDS, MERCHANDISE_CATEGORY_PRODUCT_FIELDS
+from ..models.merchandise_category import MERCHANDISE_CATEGORY_PRODUCT_FIELDS
 import base64
 
 import logging
@@ -1366,7 +1366,6 @@ class MasterProductItemAPI(http.Controller):
                 # Merchandise Category (Many2one + nilai related dari master)
                 merch = product.vit_merchandise_category_id
                 product_dict['vit_merchandise_category_id'] = merch.id or None
-                product_dict['merchandise_category_code'] = merch.u_varc or None
                 for mc_field in MERCHANDISE_CATEGORY_PRODUCT_FIELDS:
                     product_dict[mc_field] = product[mc_field] or None
                 data_master_product.append(product_dict)
@@ -1385,58 +1384,6 @@ class MasterProductItemAPI(http.Controller):
         except Exception as e:
             return serialize_error_response(str(e))
         
-class MasterMerchandiseCategoryAPI(http.Controller):
-    @http.route(['/api/master_merchandise_category/'], type='http', auth='public', methods=['GET'], csrf=False)
-    def master_merchandise_category_get(self, createdDateFrom=None, createdDateTo=None, pageSize=200, page=1, q=None, is_integrated=None, **params):
-        try:
-            check_authorization()
-
-            page = int(page)
-            if page == 0:
-                return serialize_response([], 0, 0)
-            pageSize = int(pageSize) if pageSize else 200
-
-            date_format = '%Y-%m-%d'
-            domain = []
-            if q:
-                domain.append(('u_varc', '=', str(q)))
-            if createdDateFrom or createdDateTo:
-                created_date_from = fields.Date.from_string(createdDateFrom) if createdDateFrom else fields.Date.today()
-                created_date_to = fields.Date.from_string(createdDateTo) if createdDateTo else fields.Date.today()
-                domain += [
-                    ('create_date', '>=', created_date_from.strftime(date_format)),
-                    ('create_date', '<=', created_date_to.strftime(date_format)),
-                ]
-            if is_integrated is not None:
-                domain.append(('is_integrated', '=', str(is_integrated).lower() == 'true'))
-
-            Merch = request.env['vit.merchandise.category'].sudo()
-            total_records = Merch.search_count(domain)
-            if total_records == 0:
-                return serialize_response([], 0, 0)
-
-            records = Merch.search(domain, limit=pageSize, offset=(page - 1) * pageSize, order='id desc')
-            jakarta_tz = pytz.timezone('Asia/Jakarta')
-
-            data = []
-            for rec in records:
-                row = {
-                    'id': rec.id,
-                    'create_date': str(pytz.utc.localize(rec.create_date).astimezone(jakarta_tz)),
-                    'is_integrated': rec.is_integrated,
-                    'active': rec.active,
-                }
-                for mc_field in MERCHANDISE_CATEGORY_FIELDS:
-                    row[mc_field] = rec[mc_field] or None
-                data.append(row)
-
-            total_pages = (total_records + pageSize - 1) // pageSize
-            return serialize_response(data, total_records, total_pages)
-
-        except Exception as e:
-            return serialize_error_response(str(e))
-
-
 class MasterStockTypeAPI(http.Controller):
     @http.route(['/api/master_type/'], type='http', auth='public', methods=['GET'], csrf=False)
     def master_type_get(self, createdDateFrom=None, createdDateTo=None, pageSize=200, page=1, q=None, **params):
