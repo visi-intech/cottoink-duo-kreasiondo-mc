@@ -9,5 +9,6 @@ from odoo.exceptions import UserError
 class ProductPricelist(models.Model):
     _inherit = 'product.pricelist'
 
+    vit_code = fields.Char(string="Pricelist Code", index=True, copy=False)
     is_integrated = fields.Boolean(string="Integrated", default=False)
     index_store = fields.Many2many('setting.config', string="Index Store", readonly=True)

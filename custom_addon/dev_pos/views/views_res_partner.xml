@@ -8,6 +8,8 @@
       <field name="arch" type="xml">
         <xpath expr="//field[@name='category_id']" position="after">
             <field name="customer_code"/>
+            <field name="vit_customer_vendor_code"/>
+            <field name="vit_bp_type"/>
             <field name="vit_customer_group"/>
             <field name="is_integrated" readonly="1"/>
             <field name="index_store" widget="many2many_tags" readonly="1"/>

@@ -1102,6 +1102,8 @@ class POSTMasterPricelist(http.Controller):
                         }
                         if currency_id and currency_id != pricelist.currency_id.id:
                             header_vals['currency_id'] = currency_id
+                        if data.get('vit_code'):
+                            header_vals['vit_code'] = str(data['vit_code']).strip()
                         pricelist.write(header_vals)
 
                         # Baris lama dicocokkan per (produk, min qty) -- 1 query untuk semua
@@ -1127,6 +1129,7 @@ class POSTMasterPricelist(http.Controller):
                         pricelist = env['product.pricelist'].sudo().create({
                             'name': name,
                             'currency_id': currency_id,
+                            'vit_code': str(data['vit_code']).strip() if data.get('vit_code') else False,
                             'create_uid': uid,   # sama seperti versi lama
                         })
                         to_create = [dict(vals, pricelist_id=pricelist.id) for vals in items_lines_data]
@@ -1281,20 +1284,16 @@ class POSTMasterUoM(http.Controller):
             }
 
 
-class POSTMasterCustomer(http.Controller):
-    @http.route('/api/master_customer', type='json', auth='none', methods=['POST'], csrf=False)
-    def post_master_customer(self, **kw):
+class POSTMasterContact(http.Controller):
+    @http.route('/api/master_contact', type='json', auth='none', methods=['POST'], csrf=False)
+    def post_master_contact(self, **kw):
         try:
             # Autentikasi
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
             )
             if not config:
-                return {
-                    'status': 'Failed',
-                    'code': 500,
-                    'message': 'Configuration not found.'
-                }
+                return {'status': 'Failed', 'code': 500, 'message': 'Configuration not found.'}
 
             uid = request.session.authenticate(
                 request.session.db,
@@ -1302,102 +1301,246 @@ class POSTMasterCustomer(http.Controller):
                 config.vit_config_password_api
             )
             if not uid:
-                return {
-                    'status': 'Failed',
-                    'code': 401,
-                    'message': 'Authentication failed.'
-                }
+                return {'status': 'Failed', 'code': 401, 'message': 'Authentication failed.'}
+
+            env = request.env(user=request.env.ref('base.user_admin').id)
 
             json_data = request.get_json_data()
-            items = json_data.get('items')
+            items = json_data.get('items') if isinstance(json_data, dict) else json_data
 
-            # ✅ Bisa single dict atau list
+            # Bisa single dict atau list
             if isinstance(items, dict):
                 items = [items]
             elif items is None and isinstance(json_data, dict):
                 items = [json_data]
             elif not isinstance(items, list):
+                return {'status': 'Failed', 'code': 400, 'message': "'items' must be a list or object."}
+
+            VALID_TYPES = ['person', 'company']
+            VALID_BP_TYPES = ['customer', 'vendor']
+
+            Partner = env['res.partner'].sudo()
+            Pricelist = env['product.pricelist'].sudo().with_context(active_test=False)
+            companies = env['res.company'].sudo().search([('active', '=', True)])
+
+            # =====================================================
+            # PRICELIST HELPER
+            # =====================================================
+            pricelist_cache = {}
+
+            def resolve_pricelists(vit_code):
+                """Cari pricelist HANYA berdasarkan vit_code, TERMASUK yang
+                di-archive, supaya tetap bisa dipasang dan otomatis tampil
+                lagi saat pricelist diaktifkan kembali."""
+                if vit_code in pricelist_cache:
+                    return pricelist_cache[vit_code]
+                pls = Pricelist.search([
+                    ('vit_code', '=', vit_code),
+                    '|', ('company_id', 'in', companies.ids), ('company_id', '=', False),
+                ])
+                pricelist_cache[vit_code] = pls
+                return pls
+
+            def apply_pricelist(partner, pricelists):
+                """Pasang pricelist per company (specific_property_product_pricelist
+                adalah field company-dependent). pricelists kosong = kosongkan."""
+                if not pricelists:
+                    for company in companies:
+                        partner.with_company(company).specific_property_product_pricelist = False
+                    return
+                for company in companies:
+                    pl = pricelists.filtered(lambda p: p.company_id == company)[:1] \
+                        or pricelists.filtered(lambda p: not p.company_id)[:1]
+                    if pl:
+                        partner.with_company(company).specific_property_product_pricelist = pl
+
+            def pricelist_info(partner):
+                info = []
+                for company in companies:
+                    pl = partner.with_company(company).specific_property_product_pricelist
+                    if pl:
+                        info.append({
+                            'company': company.name,
+                            'pricelist': pl.vit_code or pl.name,
+                            'active': pl.active,
+                        })
+                return info
+
+            # =====================================================
+            # BUILD RESULT HELPER
+            # =====================================================
+            def build_result(partner, action):
                 return {
-                    'status': 'Failed',
-                    'code': 400,
-                    'message': "'items' must be a list or object."
+                    'id': partner.id,
+                    'vit_customer_vendor_code': partner.vit_customer_vendor_code,
+                    'name': partner.name,
+                    'vit_bp_type': partner.vit_bp_type,
+                    'telp1': partner.phone,
+                    'contactname': partner.function,
+                    'email': partner.email,
+                    'npwp': partner.vat,
+                    'type': partner.company_type,
+                    'pricelists': pricelist_info(partner),
+                    'status': action
                 }
 
-            vals_list, created, errors = [], [], []
+            vals_list, created, updated, errors = [], [], [], []
+            seen_codes = set()
 
-            # 🔹 Validasi & kumpulkan data
+            # =====================================================
+            # PROCESS EACH ITEM
+            # =====================================================
             for data in items:
                 try:
-                    customer_code = data.get('customer_code')
-                    if not customer_code:
+                    vit_customer_vendor_code = data.get('vit_customer_vendor_code')
+                    if not vit_customer_vendor_code:
                         errors.append({
-                            'id': None,
-                            'customer_code': None,
-                            'message': "Missing customer_code"
+                            'vit_customer_vendor_code': None,
+                            'message': "Missing vit_customer_vendor_code"
                         })
                         continue
 
-                    # Cek duplikat
-                    existing = request.env['res.partner'].sudo().search(
-                        [('customer_code', '=', customer_code)], limit=1
+                    if vit_customer_vendor_code in seen_codes:
+                        errors.append({
+                            'vit_customer_vendor_code': vit_customer_vendor_code,
+                            'message': "Duplicate vit_customer_vendor_code in payload"
+                        })
+                        continue
+                    seen_codes.add(vit_customer_vendor_code)
+
+                    name = data.get('name')
+                    if not name:
+                        errors.append({
+                            'vit_customer_vendor_code': vit_customer_vendor_code,
+                            'message': "Missing name"
+                        })
+                        continue
+
+                    # Validasi company type (person/company)
+                    company_type = (data.get('type') or 'company').lower()
+                    if company_type not in VALID_TYPES:
+                        errors.append({
+                            'vit_customer_vendor_code': vit_customer_vendor_code,
+                            'message': f"Invalid 'type'. Valid values: {', '.join(VALID_TYPES)}"
+                        })
+                        continue
+
+                    # Validasi vit_bp_type (customer/vendor)
+                    vit_bp_type = (data.get('vit_bp_type') or '').lower()
+                    if not vit_bp_type:
+                        errors.append({
+                            'vit_customer_vendor_code': vit_customer_vendor_code,
+                            'message': "Missing 'vit_bp_type'. Valid values: customer, vendor"
+                        })
+                        continue
+                    if vit_bp_type not in VALID_BP_TYPES:
+                        errors.append({
+                            'vit_customer_vendor_code': vit_customer_vendor_code,
+                            'message': f"Invalid 'vit_bp_type'. Valid values: {', '.join(VALID_BP_TYPES)}"
+                        })
+                        continue
+
+                    # =====================================================
+                    # VALIDASI PRICELIST (opsional)
+                    #   - key tidak dikirim  -> pricelist tidak diubah
+                    #   - "" / null          -> pricelist dikosongkan
+                    #   - vit_code           -> dipasang
+                    # =====================================================
+                    set_pricelist = 'property_product_pricelist' in data
+                    pricelists = env['product.pricelist']
+                    if set_pricelist and data.get('property_product_pricelist'):
+                        pl_code = str(data['property_product_pricelist']).strip()
+                        pricelists = resolve_pricelists(pl_code)
+                        if not pricelists:
+                            errors.append({
+                                'vit_customer_vendor_code': vit_customer_vendor_code,
+                                'message': f"Pricelist '{pl_code}' not found"
+                            })
+                            continue
+
+                    # =====================================================
+                    # CHECK EXISTING (kode baru, fallback customer_code lama)
+                    # =====================================================
+                    existing = Partner.search(
+                        [('vit_customer_vendor_code', '=', vit_customer_vendor_code)], limit=1
+                    ) or Partner.search(
+                        [('customer_code', '=', vit_customer_vendor_code)], limit=1
                     )
-                    if existing:
-                        errors.append({
-                            'id': existing.id,
-                            'customer_code': customer_code,
-                            'message': f"Duplicate Customer code: {customer_code}"
-                        })
-                        continue
 
-                    # Data customer
-                    vals_list.append({
-                        'name': data.get('name'),
-                        'customer_code': customer_code,
-                        'street': data.get('street'),
-                        'phone': data.get('phone'),
+                    # =====================================================
+                    # PREPARE VALUES
+                    # =====================================================
+                    customer_vals = {
+                        'name': name,
+                        'vit_customer_vendor_code': vit_customer_vendor_code,
+                        'vit_bp_type': vit_bp_type,
+                        'customer_rank': 1 if vit_bp_type == 'customer' else 0,
+                        'supplier_rank': 1 if vit_bp_type == 'vendor' else 0,
+                        'phone': data.get('telp1'),
                         'email': data.get('email'),
-                        'mobile': data.get('mobile'),
-                        'website': data.get('website'),
-                        'create_uid': uid,
-                        ''
-                        'customer_rank': 1,  # supaya otomatis dianggap customer
-                    })
+                        'vat': data.get('npwp'),
+                        'company_type': company_type,
+                        # tandai belum terintegrasi supaya ikut sync MC -> SS
+                        'is_integrated': False,
+                        'index_store': [(5, 0, 0)],
+                    }
+                    # Sync MC -> SS mencocokkan res.partner lewat customer_code,
+                    # jadi customer otomatis diberi customer_code = kode SAP.
+                    if vit_bp_type == 'customer':
+                        customer_vals['customer_code'] = vit_customer_vendor_code
+
+                    contact_name = data.get('contactname')
+                    if contact_name is not None:
+                        customer_vals['function'] = contact_name
+
+                    # =====================================================
+                    # CREATE OR UPDATE
+                    # =====================================================
+                    if existing:
+                        existing.write(customer_vals)
+                        if set_pricelist:
+                            apply_pricelist(existing, pricelists)
+                        updated.append(build_result(existing, 'updated'))
+                    else:
+                        customer_vals['create_uid'] = uid
+                        vals_list.append((customer_vals, set_pricelist, pricelists))
 
                 except Exception as e:
                     errors.append({
-                        'id': data.get('id'),
-                        'customer_code': data.get('customer_code'),
+                        'vit_customer_vendor_code': data.get('vit_customer_vendor_code'),
                         'message': f"Exception: {str(e)}"
                     })
 
-            # 🔹 Bulk create kalau ada data valid
+            # =====================================================
+            # BULK CREATE
+            # =====================================================
             if vals_list:
-                customers = request.env['res.partner'].sudo().create(vals_list)
-                for rec in customers:
-                    created.append({
-                        'id': rec.id,
-                        'customer_code': rec.customer_code,
-                        'name': rec.name,
-                        'email': rec.email,
-                        'status': 'success'
-                    })
+                customers = Partner.create([v for v, _, _ in vals_list])
+                for rec, (_, set_pricelist, pricelists) in zip(customers, vals_list):
+                    if set_pricelist:
+                        apply_pricelist(rec, pricelists)
+                    created.append(build_result(rec, 'created'))
 
             return {
                 'code': 200 if not errors else 207,
                 'status': 'success' if not errors else 'partial_success',
-                'created_customers': created,
+                'summary': {
+                    'total': len(items),
+                    'created': len(created),
+                    'updated': len(updated),
+                    'failed': len(errors)
+                },
+                'created': created,
+                'updated': updated,
                 'errors': errors
             }
 
         except Exception as e:
             request.env.cr.rollback()
-            _logger.error(f"Failed to create customers: {str(e)}")
-            return {
-                'status': 'Failed',
-                'code': 500,
-                'message': f"Failed to create customers: {str(e)}"
-            }
-    
+            _logger.error(f"Failed to process contacts: {str(e)}", exc_info=True)
+            return {'status': 'Failed', 'code': 500, 'message': f"Failed to process contacts: {str(e)}"}
+
+
 class POSTMasterWarehouse(http.Controller):
     @http.route('/api/master_warehouse', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_warehouse(self, **kw):

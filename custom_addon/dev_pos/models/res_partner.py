@@ -11,6 +11,12 @@ class ResPartner(models.Model):
     is_integrated = fields.Boolean(string="Integrated", default=False, readonly=True, tracking=True)
     index_store = fields.Many2many('setting.config', string="Index Store", readonly=True)
     vit_customer_group = fields.Many2one('customer.group', string="Customer Group", tracking=True)
+    # Dari SAP (API /api/master_contact)
+    vit_customer_vendor_code = fields.Char(string='Customer/Vendor Code', index=True, copy=False, tracking=True)
+    vit_bp_type = fields.Selection([
+        ('customer', 'Customer'),
+        ('vendor', 'Vendor'),
+    ], string='BP Type', tracking=True)
 
     @api.onchange('vit_customer_group')
     def _onchange_vit_customer_group(self):

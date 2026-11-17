@@ -7,6 +7,7 @@
       <field name="inherit_id" ref="product.product_pricelist_view"/>
       <field name="arch" type="xml">
         <xpath expr="//field[@name='currency_id']" position="after">
+          <field name="vit_code"/>
           <field name="is_integrated"/>
           <field name="index_store" widget="many2many_tags"/>
         </xpath>
