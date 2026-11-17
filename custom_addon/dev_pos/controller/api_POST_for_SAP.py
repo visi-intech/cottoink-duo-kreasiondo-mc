@@ -952,7 +952,7 @@ class POSTMasterPricelist(http.Controller):
             data = request.get_json_data()
 
             # Validate required fields
-            required_fields = ['name', 'currency_id', 'pricelist_ids']
+            required_fields = ['name', 'pricelist_ids']
             missing_fields = [field for field in required_fields if not data.get(field)]
             if missing_fields:
                 return {
@@ -965,23 +965,23 @@ class POSTMasterPricelist(http.Controller):
             currency_id = data.get('currency_id')
             lines = data.get('pricelist_ids', [])
 
-            # Validate currency
-            currency = env['res.currency'].sudo().browse(currency_id)
-            if not currency.exists():
+            # Pricelist dicari lewat NAME: kalau sudah ada -> baris di-upsert ke pricelist itu,
+            # kalau belum ada -> pricelist baru dibuat (currency_id wajib).
+            existing_pricelist = env['product.pricelist'].sudo().search([('name', '=', name)], limit=1)
+
+            if not existing_pricelist and not currency_id:
+                return {
+                    'status': "Failed",
+                    'code': 400,
+                    'message': f"Pricelist '{name}' belum ada, currency_id wajib untuk membuat pricelist baru."
+                }
+
+            # Validate currency (kalau dikirim)
+            if currency_id and not env['res.currency'].sudo().browse(currency_id).exists():
                 return {
                     'status': "Failed",
                     'code': 400,
                     'message': f"Currency with ID {currency_id} not found."
-                }
-
-            # Check for duplicate pricelist
-            existing_pricelist = env['product.pricelist'].sudo().search([('name', '=', name)], limit=1)
-            if existing_pricelist:
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Pricelist with name '{name}' already exists.",
-                    'id': existing_pricelist.id
                 }
 
             # =========================================================
@@ -1086,19 +1086,54 @@ class POSTMasterPricelist(http.Controller):
                 }
 
             # =========================================================
-            # CREATE: header dulu, baris per chunk -- semuanya dalam 1 savepoint
-            # (atomik: kalau 1 chunk gagal, pricelist + semua barisnya dibatalkan)
+            # CREATE / UPSERT -- semuanya dalam 1 savepoint
+            # (atomik: kalau gagal, pricelist + semua barisnya dibatalkan)
             # =========================================================
+            PricelistItem = env['product.pricelist.item'].sudo()
+            total_created = total_updated = 0
             try:
                 with cr.savepoint():
-                    pricelist = env['product.pricelist'].sudo().create({
-                        'name': name,
-                        'currency_id': currency_id,
-                        'create_uid': uid,   # sama seperti versi lama
-                    })
-                    PricelistItem = env['product.pricelist.item'].sudo()
-                    for chunk in _chunks(items_lines_data, LINE_CREATE_CHUNK):
-                        PricelistItem.create([dict(vals, pricelist_id=pricelist.id) for vals in chunk])
+                    if existing_pricelist:
+                        pricelist = existing_pricelist
+                        header_vals = {
+                            # supaya ikut sync ulang MC -> SS ke semua store
+                            'is_integrated': False,
+                            'index_store': [(5, 0, 0)],
+                        }
+                        if currency_id and currency_id != pricelist.currency_id.id:
+                            header_vals['currency_id'] = currency_id
+                        pricelist.write(header_vals)
+
+                        # Baris lama dicocokkan per (produk, min qty) -- 1 query untuk semua
+                        tmpl_ids = list({vals['product_tmpl_id'] for vals in items_lines_data})
+                        existing_items = {}
+                        for item in PricelistItem.search([('pricelist_id', '=', pricelist.id),
+                                                          ('product_tmpl_id', 'in', tmpl_ids)]):
+                            existing_items.setdefault((item.product_tmpl_id.id, item.min_quantity), item)
+
+                        to_create = []
+                        for vals in items_lines_data:
+                            key = (vals['product_tmpl_id'], float(vals['min_quantity'] or 0))
+                            item = existing_items.get(key)
+                            if item:
+                                # 'price' = field compute (label), tidak perlu di-write
+                                upd = {k: v for k, v in vals.items() if k != 'price'}
+                                upd['is_updated'] = True   # supaya baris ikut sync ulang ke SS
+                                item.write(upd)
+                                total_updated += 1
+                            else:
+                                to_create.append(dict(vals, pricelist_id=pricelist.id))
+                    else:
+                        pricelist = env['product.pricelist'].sudo().create({
+                            'name': name,
+                            'currency_id': currency_id,
+                            'create_uid': uid,   # sama seperti versi lama
+                        })
+                        to_create = [dict(vals, pricelist_id=pricelist.id) for vals in items_lines_data]
+
+                    for chunk in _chunks(to_create, LINE_CREATE_CHUNK):
+                        PricelistItem.create(chunk)
+                    total_created = len(to_create)
 
             except Exception as create_error:
                 _logger.error(f"Failed to create pricelist: {str(create_error)}", exc_info=True)
@@ -1111,9 +1146,12 @@ class POSTMasterPricelist(http.Controller):
             return {
                 'code': 200,
                 'status': 'success',
-                'message': 'Price List created successfully',
+                'message': ('Price List updated successfully' if existing_pricelist
+                            else 'Price List created successfully'),
                 'id': pricelist.id,
-                'name': pricelist.name
+                'name': pricelist.name,
+                'total_created_lines': total_created,
+                'total_updated_lines': total_updated,
             }
 
         except Exception as e:
