@@ -681,11 +681,14 @@ class POSTMasterItem(http.Controller):
             # ============================================================
             # 2. PRELOAD SEMUA LOOKUP SEKALIGUS (chunked, tanpa query di dalam loop)
             # ============================================================
-            # Produk yang sudah ada -- TERMASUK yang diarsipkan (active=False)
-            existing_ids = {}
+            # Produk yang sudah ada -- TERMASUK yang diarsipkan (active=False),
+            # supaya produk arsip di-UPDATE (dan bisa diaktifkan lagi), bukan dibuat dobel.
+            existing_ids, existing_active = {}, {}
             for row in _bulk_read(Product.with_context(active_test=False),
-                                  'default_code', all_codes, ['default_code']):
-                existing_ids.setdefault(row['default_code'], row['id'])
+                                  'default_code', all_codes, ['default_code', 'active']):
+                if row['default_code'] not in existing_ids:
+                    existing_ids[row['default_code']] = row['id']
+                    existing_active[row['id']] = row['active']
 
             categ_map = {}
             for row in _bulk_read(Category, 'complete_name', all_categ_names, ['complete_name']):
@@ -735,11 +738,14 @@ class POSTMasterItem(http.Controller):
                 return result
 
             # ============================================================
-            # 3. VALIDASI + SIAPKAN VALS (tanpa query), create per batch
+            # 3. PROSES ITEM: CREATE (produk baru) / UPDATE (sudah ada,
+            #    termasuk yang diarsipkan) / ARCHIVE (payload active=false)
             # ============================================================
-            created, errors = [], []
-            pending = []            # [(product_code, vals), ...]
+            ProductUpd = env['product.template'].sudo().with_context(active_test=False)
+            created, updated, errors = [], [], []
+            pending = []            # [(product_code, vals), ...] untuk create
             seen_codes = set()      # deteksi kode dobel DI DALAM payload yang sama
+            update_counter = 0
 
             def flush_pending():
                 """Create 1 batch dalam savepoint; kalau batch gagal, ulangi
@@ -754,8 +760,8 @@ class POSTMasterItem(http.Controller):
                         for code, _vals in batch:
                             _advisory_lock(cr, f"product.template:{code}")
                         recs = Product.create([vals for _code, vals in batch])
-                    new_items = [{'id': r.id, 'product_code': r.default_code, 'name': r.name}
-                                 for r in recs]
+                    new_items = [{'id': r.id, 'product_code': r.default_code, 'name': r.name,
+                                  'action': 'created'} for r in recs]
                 except Exception as bulk_err:
                     _logger.warning(f"Bulk create produk gagal, fallback satu-per-satu: {bulk_err}")
                     for code, single_vals in batch:
@@ -764,7 +770,7 @@ class POSTMasterItem(http.Controller):
                                 _advisory_lock(cr, f"product.template:{code}")
                                 rec = Product.create(single_vals)
                             new_items.append({'id': rec.id, 'product_code': rec.default_code,
-                                              'name': rec.name})
+                                              'name': rec.name, 'action': 'created'})
                         except Exception as single_err:
                             errors.append({'id': -1, 'product_code': code,
                                            'message': f"Create failed: {single_err}"})
@@ -778,18 +784,18 @@ class POSTMasterItem(http.Controller):
                         errors.append({'id': -1, 'product_code': None, 'message': "Missing product_code"})
                         continue
 
-                    # Duplicate check (database + payload yang sama)
-                    if product_code in existing_ids:
-                        errors.append({'id': existing_ids[product_code], 'product_code': product_code,
-                                       'message': f"Duplicate item code: {product_code}"})
-                        continue
                     if product_code in seen_codes:
                         errors.append({'id': -1, 'product_code': product_code,
                                        'message': f"Duplicate item code in payload: {product_code}"})
                         continue
+                    seen_codes.add(product_code)
+
+                    existing_id = existing_ids.get(product_code)
+                    is_new = not existing_id
 
                     # Category -- SEMENTARA tidak wajib: kalau kosong / tidak ditemukan,
-                    # categ_id tidak dikirim sehingga Odoo memakai kategori default (All).
+                    # categ_id tidak diisi (produk baru -> kategori default All,
+                    # produk lama -> kategori tidak diubah).
                     category_name = data.get('category_name')
                     category_id = categ_map.get(category_name) if category_name else False
 
@@ -801,7 +807,7 @@ class POSTMasterItem(http.Controller):
                         if cid in pos_ids_found:
                             pos_ids.append(cid)
                         else:
-                            errors.append({'id': -1, 'product_code': product_code,
+                            errors.append({'id': existing_id or -1, 'product_code': product_code,
                                            'message': f"POS category ID {cid} not found."})
                             lookup_error = True
 
@@ -810,60 +816,62 @@ class POSTMasterItem(http.Controller):
                         if tax_name in tax_map:
                             tax_ids.append(tax_map[tax_name])
                         else:
-                            errors.append({'id': -1, 'product_code': product_code,
+                            errors.append({'id': existing_id or -1, 'product_code': product_code,
                                            'message': f"Tax '{tax_name}' not found."})
                             lookup_error = True
                     if lookup_error:
                         continue
 
-                    # UoM
+                    # UoM -- wajib untuk produk baru; untuk update opsional
+                    # (kalau dikirim tetap harus valid)
                     uom_name = data.get('uom_name')
-                    if not uom_name:
-                        errors.append({'id': -1, 'product_code': product_code, 'message': "uom_name missing"})
-                        continue
-                    uom = uom_map.get(uom_name)
-                    if not uom:
-                        errors.append({'id': -1, 'product_code': product_code,
+                    uom_po_name = data.get('uom_po_name')
+                    if is_new:
+                        if not uom_name:
+                            errors.append({'id': -1, 'product_code': product_code, 'message': "uom_name missing"})
+                            continue
+                        if not uom_po_name:
+                            errors.append({'id': -1, 'product_code': product_code, 'message': "uom_po_name missing"})
+                            continue
+                    uom = uom_map.get(uom_name) if uom_name else None
+                    if uom_name and not uom:
+                        errors.append({'id': existing_id or -1, 'product_code': product_code,
                                        'message': f"UoM '{uom_name}' not found."})
                         continue
-
-                    uom_po_name = data.get('uom_po_name')
-                    if not uom_po_name:
-                        errors.append({'id': -1, 'product_code': product_code, 'message': "uom_po_name missing"})
-                        continue
-                    uom_po = uom_map.get(uom_po_name)
-                    if not uom_po:
-                        errors.append({'id': -1, 'product_code': product_code,
+                    uom_po = uom_map.get(uom_po_name) if uom_po_name else None
+                    if uom_po_name and not uom_po:
+                        errors.append({'id': existing_id or -1, 'product_code': product_code,
                                        'message': f"Purchase UoM '{uom_po_name}' not found."})
                         continue
-
-                    if uom[1] != uom_po[1]:   # kategori UoM wajib sama
-                        errors.append({'id': -1, 'product_code': product_code,
+                    if uom and uom_po and uom[1] != uom_po[1]:   # kategori UoM wajib sama
+                        errors.append({'id': existing_id or -1, 'product_code': product_code,
                                        'message': "Default UoM and Purchase UoM must match."})
                         continue
 
-                    if not data.get('product_name'):
+                    if is_new and not data.get('product_name'):
                         errors.append({'id': -1, 'product_code': product_code,
                                        'message': "Missing product_name"})
                         continue
 
-                    # Build vals -- field & nama sama seperti versi lama.
-                    # Field opsional hanya dikirim kalau ADA di payload (dulu None
-                    # dikirim eksplisit, mis. 'active': None membuat produk nonaktif).
-                    vals = {
-                        'name':           data['product_name'],
-                        'default_code':   product_code,
-                        'standard_price': data.get('standard_price', data.get('cost', 0.0)),
-                        'uom_id':         uom[0],
-                        'uom_po_id':      uom_po[0],
-                        'create_uid':     uid,   # sama seperti versi lama
-                        'pos_categ_ids':  [(6, 0, pos_ids)],
-                        'taxes_id':       [(6, 0, tax_ids)],   # selalu dikirim: kosong = tanpa pajak default
-                    }
+                    # Build vals -- field opsional hanya dikirim kalau ADA di payload,
+                    # jadi update tidak menimpa field yang tidak dikirim.
+                    vals = {}
+                    if data.get('product_name'):
+                        vals['name'] = data['product_name']
+                    if 'standard_price' in data or 'cost' in data:
+                        vals['standard_price'] = data.get('standard_price', data.get('cost', 0.0))
+                    if uom:
+                        vals['uom_id'] = uom[0]
+                    if uom_po:
+                        vals['uom_po_id'] = uom_po[0]
                     if category_id:
                         vals['categ_id'] = category_id
+                    if is_new or 'pos_categ_ids' in data or 'pos_categ_id' in data:
+                        vals['pos_categ_ids'] = [(6, 0, pos_ids)]
+                    if is_new or 'taxes_names' in data:
+                        vals['taxes_id'] = [(6, 0, tax_ids)]   # kosong = tanpa pajak
                     for payload_key, field_name in (
-                        ('active',           'active'),
+                        ('active',           'active'),         # false = ARCHIVE, true = unarchive
                         ('product_type',     'detailed_type'),
                         ('invoice_policy',   'invoice_policy'),
                         ('sales_price',      'list_price'),
@@ -874,32 +882,70 @@ class POSTMasterItem(http.Controller):
                         if payload_key in data:
                             vals[field_name] = data[payload_key]
 
-                    # Merchandise Category (Many2one): dibentuk/di-update dari field u_* item ini,
+                    # Merchandise Category (Many2one): dibentuk/di-update dari field item ini,
                     # kuncinya Artikel Code (vit_artikel_code, atau key lama U_VARC)
                     merch_code = _payload_val(data, 'vit_artikel_code')[1]
                     if merch_code:
                         merch_id, merch_err = upsert_merch(merch_code, data)
                         if merch_err:
-                            errors.append({'id': -1, 'product_code': product_code, 'message': merch_err})
+                            errors.append({'id': existing_id or -1, 'product_code': product_code,
+                                           'message': merch_err})
                             continue
                         vals['vit_merchandise_category_id'] = merch_id
 
-                    seen_codes.add(product_code)
-                    pending.append((product_code, vals))
-                    if len(pending) >= BATCH_CREATE_SIZE:
-                        flush_pending()
+                    if is_new:
+                        # CREATE (per batch)
+                        vals['default_code'] = product_code
+                        vals['create_uid'] = uid   # sama seperti versi lama
+                        pending.append((product_code, vals))
+                        if len(pending) >= BATCH_CREATE_SIZE:
+                            flush_pending()
+                        continue
+
+                    # UPDATE / ARCHIVE (savepoint + advisory lock per record)
+                    # Ditandai belum terintegrasi supaya perubahan ikut sync ulang ke store.
+                    vals.update({'is_integrated': False, 'index_store': [(5, 0, 0)]})
+                    action = 'archived' if data.get('active') is False else (
+                        'unarchived' if data.get('active') is True and not existing_active.get(existing_id, True)
+                        else 'updated')
+                    try:
+                        with cr.savepoint():
+                            _advisory_lock(cr, f"product.template.id:{existing_id}")
+                            rec = ProductUpd.browse(existing_id)
+                            rec.write(vals)
+                        updated.append({'id': rec.id, 'product_code': rec.default_code,
+                                        'name': rec.name, 'action': action})
+                        update_counter += 1
+                        if update_counter % BATCH_CREATE_SIZE == 0:
+                            _commit_with_retry(cr, context=f"item_update_{update_counter}")
+                    except Exception as upd_err:
+                        errors.append({'id': existing_id, 'product_code': product_code,
+                                       'message': f"Update failed: {upd_err}"})
 
                 except Exception as e:
                     errors.append({'id': -1, 'product_code': data.get('product_code'), 'message': str(e)})
 
             flush_pending()   # sisa batch
+            _commit_with_retry(cr, context="item_final")
+
+            # ============================================================
+            # RESPONSE
+            # ============================================================
+            if errors and (created or updated):
+                code, status = 207, 'partial_success'
+            elif created or updated:
+                code, status = 200, 'success'
+            else:
+                code, status = 422, 'failed'
 
             return {
-                'code':          200 if not errors else 207,
-                'status':        'success' if not errors else 'partial_success',
+                'code':          code,
+                'status':        status,
                 'created_items': created,
+                'updated_items': updated,
                 'errors':        errors,
                 'total_created': len(created),
+                'total_updated': len(updated),
                 'total_errors':  len(errors),
             }
 
