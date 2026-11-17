@@ -788,17 +788,10 @@ class POSTMasterItem(http.Controller):
                                        'message': f"Duplicate item code in payload: {product_code}"})
                         continue
 
-                    # Category
+                    # Category -- SEMENTARA tidak wajib: kalau kosong / tidak ditemukan,
+                    # categ_id tidak dikirim sehingga Odoo memakai kategori default (All).
                     category_name = data.get('category_name')
-                    if not category_name:
-                        errors.append({'id': -1, 'product_code': product_code,
-                                       'message': "category_name missing"})
-                        continue
-                    category_id = categ_map.get(category_name)
-                    if not category_id:
-                        errors.append({'id': -1, 'product_code': product_code,
-                                       'message': f"Category '{category_name}' not found."})
-                        continue
+                    category_id = categ_map.get(category_name) if category_name else False
 
                     # POS category & Tax: kalau ADA yang tidak ditemukan, item dilewati
                     # (semua kesalahan item ini tetap dilaporkan)
@@ -863,11 +856,12 @@ class POSTMasterItem(http.Controller):
                         'standard_price': data.get('standard_price', data.get('cost', 0.0)),
                         'uom_id':         uom[0],
                         'uom_po_id':      uom_po[0],
-                        'categ_id':       category_id,
                         'create_uid':     uid,   # sama seperti versi lama
                         'pos_categ_ids':  [(6, 0, pos_ids)],
                         'taxes_id':       [(6, 0, tax_ids)],   # selalu dikirim: kosong = tanpa pajak default
                     }
+                    if category_id:
+                        vals['categ_id'] = category_id
                     for payload_key, field_name in (
                         ('active',           'active'),
                         ('product_type',     'detailed_type'),
