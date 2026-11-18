@@ -958,7 +958,7 @@ class POSTMasterItem(http.Controller):
 
 # controllers/master_pricelist.py
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from odoo import http
 from odoo.http import request
@@ -968,8 +968,8 @@ _logger = logging.getLogger(__name__)
 # =========================================================
 # KONFIGURASI BATCH
 # =========================================================
-LOOKUP_CHUNK      = 5000   # jumlah default_code per query preload produk
-LINE_CREATE_CHUNK = 5000   # jumlah baris pricelist per batch ORM create
+PRODUCT_SEARCH_CHUNK = 5000      # jumlah default_code / id per query
+LINE_CREATE_CHUNK    = 5000      # batch create items
 
 
 def _chunks(values, size):
@@ -978,240 +978,380 @@ def _chunks(values, size):
         yield values[i:i + size]
 
 
+# =========================================================
+# HELPER: SAVEPOINT
+# =========================================================
+def _savepoint(cr, name):
+    cr.execute(f'SAVEPOINT "{name}"')
+
+
+def _release(cr, name):
+    cr.execute(f'RELEASE SAVEPOINT "{name}"')
+
+
+def _rollback_to(cr, name):
+    try:
+        cr.execute(f'ROLLBACK TO SAVEPOINT "{name}"')
+    except Exception:
+        pass
+
+
 class POSTMasterPricelist(http.Controller):
+
+    # applied_on yang BERBASIS PRODUK. Nilai lain (2_product_category /
+    # 3_global) membuat Odoo MENGOSONGKAN product_tmpl_id saat create.
+    PRODUCT_APPLIED_ON = ('0_product_variant', '1_product')
 
     @http.route('/api/master_pricelist', type='json', auth='none', methods=['POST'], csrf=False)
     def post_pricelist(self, **kw):
+        """
+        API sinkronisasi pricelist dari SAP -- RIWAYAT HARGA:
+        - Produk baru di pricelist  -> INSERT baris baru.
+        - Harga/isi berubah         -> INSERT baris baru (berlaku mulai sekarang)
+                                       + baris lama DITUTUP (date_end = sesaat
+                                       sebelum baris baru mulai).
+        - Isi sama                  -> tidak ada perubahan.
+        Tidak pernah menghapus/menimpa baris lama.
+        Pricelist dicari berdasarkan vit_code (per company).
+        """
         try:
-            # Authentication (TETAP seperti versi lama)
+            # =========================================================
+            # AUTHENTICATION (sama seperti endpoint lain)
+            # =========================================================
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
                 return {'status': "Failed", 'code': 500, 'message': "Configuration not found."}
-            
-            uid = request.session.authenticate(request.session.db, config.vit_config_username, config.vit_config_password_api)
+
+            uid = request.session.authenticate(request.session.db, config.vit_config_username,
+                                               config.vit_config_password_api)
             if not uid:
                 return {'status': "Failed", 'code': 401, 'message': "Authentication failed."}
 
             env = request.env(user=request.env.ref('base.user_admin').id)
             cr = request.env.cr
 
+            Pricelist     = env['product.pricelist'].sudo()
+            PricelistItem = env['product.pricelist.item'].sudo()
+            Product       = env['product.product'].sudo()
+            Currency      = env['res.currency'].sudo()
+            Company       = env['res.company'].sudo()
+
+            # =========================================================
+            # DATA PREPARATION
+            # =========================================================
             data = request.get_json_data()
+            items = data.get('items', [])
+            if isinstance(items, dict):
+                items = [items]
+            elif not isinstance(items, list):
+                items = [data]
 
-            # Validate required fields
-            required_fields = ['name', 'pricelist_ids']
-            missing_fields = [field for field in required_fields if not data.get(field)]
-            if missing_fields:
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Missing required fields: {', '.join(missing_fields)}"
-                }
-
-            name = data.get('name')
-            currency_id = data.get('currency_id')
-            lines = data.get('pricelist_ids', [])
-
-            # Pricelist dicari lewat NAME: kalau sudah ada -> baris di-upsert ke pricelist itu,
-            # kalau belum ada -> pricelist baru dibuat (currency_id wajib).
-            existing_pricelist = env['product.pricelist'].sudo().search([('name', '=', name)], limit=1)
-
-            if not existing_pricelist and not currency_id:
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Pricelist '{name}' belum ada, currency_id wajib untuk membuat pricelist baru."
-                }
-
-            # Validate currency (kalau dikirim)
-            if currency_id and not env['res.currency'].sudo().browse(currency_id).exists():
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Currency with ID {currency_id} not found."
-                }
+            if not items:
+                return {'code': 400, 'status': 'Failed', 'message': 'No items provided.'}
 
             # =========================================================
-            # PRELOAD SEMUA PRODUK SEKALIGUS (chunked) -- dulu 1 search per baris
+            # GET ACTIVE COMPANIES
             # =========================================================
-            all_codes = {line.get('product_code') for line in lines if line.get('product_code')}
-            product_tmpl_map = {}   # default_code -> product_tmpl_id
-            Product = env['product.product'].sudo()
-            for chunk in _chunks(all_codes, LOOKUP_CHUNK):
-                for row in Product.search_read([('default_code', 'in', chunk)],
-                                               ['default_code', 'product_tmpl_id']):
-                    # setdefault: kalau 1 kode punya >1 varian, ambil yang pertama
-                    # (sama dengan search(..., limit=1) pada versi lama)
-                    product_tmpl_map.setdefault(row['default_code'], row['product_tmpl_id'][0])
+            companies = Company.search([('active', '=', True)])
+            if not companies:
+                return {'status': 'Failed', 'code': 404, 'message': 'No active companies found.'}
+            company_ids = companies.ids
 
             # =========================================================
-            # VALIDASI SEMUA BARIS (tanpa query di dalam loop)
+            # LANGKAH 1: Kumpulkan nilai unik dari payload
             # =========================================================
-            missing_products = []
-            invalid_dates = []
-            items_lines_data = []
-            date_cache = {}   # string tanggal yang sama tidak di-parse berulang
+            all_product_codes = set()
+            all_currency_ids  = set()
+            all_vit_codes     = set()
 
-            def parse_dt(value):
-                if value not in date_cache:
-                    date_cache[value] = datetime.strptime(value.split('.')[0], '%Y-%m-%d %H:%M:%S')
-                return date_cache[value]
+            for item in items:
+                if item.get('product_code'):
+                    all_product_codes.add(item['product_code'])
+                for price in item.get('prices', []) or []:
+                    if price.get('vit_code'):
+                        all_vit_codes.add(str(price['vit_code']))
+                    if price.get('currency_id'):
+                        all_currency_ids.add(price['currency_id'])
 
-            for line in lines:
-                product_code = line.get('product_code')
+            if not all_vit_codes:
+                return {'code': 400, 'status': 'Failed',
+                        'message': 'No vit_code provided for pricelist in any item.'}
+
+            # =========================================================
+            # LANGKAH 2: Preload produk (chunked)
+            # =========================================================
+            product_map = {}
+            for chunk_codes in _chunks(all_product_codes, PRODUCT_SEARCH_CHUNK):
+                products = Product.search([
+                    ('default_code', 'in', chunk_codes),
+                    '|', ('company_id', 'in', company_ids), ('company_id', '=', False),
+                ])
+                for p in products:
+                    product_map.setdefault((p.default_code, p.company_id.id or False), p.product_tmpl_id.id)
+
+            def get_tmpl_id(code, company_id):
+                return product_map.get((code, company_id)) or product_map.get((code, False))
+
+            # =========================================================
+            # LANGKAH 3: Preload pricelist berdasarkan vit_code
+            # (TERMASUK yang diarsipkan, supaya tidak dibuat dobel).
+            # Pricelist tanpa company (company_id kosong) dipakai sebagai
+            # fallback untuk semua company.
+            # =========================================================
+            existing_pl_map = {}
+            for pl in Pricelist.with_context(active_test=False).search([
+                ('vit_code', 'in', list(all_vit_codes)),
+                '|', ('company_id', 'in', company_ids), ('company_id', '=', False),
+            ], order='active desc, id asc'):
+                existing_pl_map.setdefault((pl.vit_code, pl.company_id.id or False), pl)
+
+            def get_pricelist(vit_code, company_id):
+                return existing_pl_map.get((vit_code, company_id)) or existing_pl_map.get((vit_code, False))
+
+            # =========================================================
+            # LANGKAH 4: Validasi currency
+            # =========================================================
+            valid_currencies = set(Currency.browse(list(all_currency_ids)).exists().filtered('active').ids)
+
+            # =========================================================
+            # LANGKAH 5: Bangun pricelist_data -- group by (vit_code, company_id)
+            # =========================================================
+            pricelist_data  = {}
+            skipped         = []   # baris payload yang dilewati + alasannya
+            # Odoo menyimpan datetime dalam UTC (di Windows datetime.now() = jam lokal)
+            now      = datetime.utcnow().replace(microsecond=0)
+            date_end = datetime(2099, 12, 31, 23, 59, 59)
+
+            for item in items:
+                product_code = item.get('product_code')
                 if not product_code:
-                    return {
-                        'status': "Failed",
-                        'code': 400,
-                        'message': "Product code is required for all pricelist items."
-                    }
-
-                tmpl_id = product_tmpl_map.get(product_code)
-                if not tmpl_id:
-                    missing_products.append(product_code)
+                    skipped.append({'product_code': None, 'message': 'Missing product_code'})
                     continue
 
-                # Validate and parse dates
-                date_start = line.get('date_start')
-                date_end = line.get('date_end')
+                prices = item.get('prices', []) or []
+                if not prices:
+                    skipped.append({'product_code': product_code, 'message': 'No prices provided'})
+                    continue
 
-                try:
-                    if date_start:
-                        date_start = parse_dt(date_start)
-                    if date_end:
-                        date_end = parse_dt(date_end)
+                quantity = item.get('quantity', 1)
 
-                    if date_start and date_end and date_start > date_end:
-                        invalid_dates.append(product_code)
+                for price in prices:
+                    vit_code    = str(price['vit_code']) if price.get('vit_code') else None
+                    currency_id = price.get('currency_id')
+                    if not vit_code or not currency_id:
+                        skipped.append({'product_code': product_code, 'vit_code': vit_code,
+                                        'message': 'vit_code / currency_id missing'})
                         continue
-                except ValueError as e:
-                    return {
-                        'status': "Failed",
-                        'code': 400,
-                        'message': f"Invalid date format for product {product_code}: {str(e)}"
+                    if currency_id not in valid_currencies:
+                        skipped.append({'product_code': product_code, 'vit_code': vit_code,
+                                        'message': f'Currency {currency_id} not found / inactive'})
+                        continue
+
+                    applied_on = price.get('conditions') or '1_product'
+                    if applied_on not in self.PRODUCT_APPLIED_ON:
+                        _logger.warning(f"[PRICELIST] {product_code}/{vit_code}: conditions="
+                                        f"'{applied_on}' tidak berbasis produk, dipaksa '1_product'.")
+                        applied_on = '1_product'
+
+                    line_vals = {
+                        'applied_on':    applied_on,
+                        'compute_price': price.get('compute_price') or 'fixed',
+                        'fixed_price':   float(price.get('fixed_price', 0.0) or 0.0),
+                        'percent_price': float(price.get('percent_price', 0.0) or 0.0),
+                        'min_quantity':  float(quantity or 0.0),
                     }
 
-                # Validate pricing fields
-                compute_price = line.get('compute_price')
-                if compute_price == 'percentage' and not line.get('percent_price'):
-                    return {
-                        'status': "Failed",
-                        'code': 400,
-                        'message': f"Percent price is required for percentage computation for product {product_code}"
-                    }
-                elif compute_price == 'fixed' and not line.get('fixed_price'):
-                    return {
-                        'status': "Failed",
-                        'code': 400,
-                        'message': f"Fixed price is required for fixed computation for product {product_code}"
-                    }
+                    found_any = False
+                    for company in companies:
+                        cid = company.id
+                        tmpl_id = get_tmpl_id(product_code, cid)
+                        if not tmpl_id:
+                            continue
+                        found_any = True
 
-                items_lines_data.append({
-                    'product_tmpl_id': tmpl_id,
-                    'applied_on': line.get('conditions'),
-                    'compute_price': compute_price,
-                    'percent_price': line.get('percent_price'),
-                    'fixed_price': line.get('fixed_price'),
-                    'min_quantity': line.get('quantity', 1),
-                    'price': line.get('price'),
-                    'date_start': date_start,
-                    'date_end': date_end,
-                })
+                        key = (vit_code, cid)
+                        if key not in pricelist_data:
+                            pricelist_data[key] = {
+                                'vit_code':      vit_code,
+                                'company_id':    cid,
+                                'company_name':  company.name,
+                                'currency_id':   currency_id,
+                                'name':          price.get('pricelist_name') or vit_code,
+                                'active':        price.get('active', True),
+                                'line_vals_map': {},   # tmpl_id -> line_vals
+                            }
+                        pricelist_data[key]['line_vals_map'][tmpl_id] = line_vals
 
-            if missing_products:
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Products with codes {', '.join(missing_products)} not found. Pricelist creation cancelled."
-                }
-
-            if invalid_dates:
-                return {
-                    'status': "Failed",
-                    'code': 400,
-                    'message': f"Invalid date range for products: {', '.join(invalid_dates)}"
-                }
+                    if not found_any:
+                        skipped.append({'product_code': product_code, 'vit_code': vit_code,
+                                        'message': 'Product not found'})
 
             # =========================================================
-            # CREATE / UPSERT -- semuanya dalam 1 savepoint
-            # (atomik: kalau gagal, pricelist + semua barisnya dibatalkan)
+            # LANGKAH 6: Preload baris yang SEDANG BERLAKU per
+            # (pricelist, produk) -- yang belum berakhir, id TERBARU.
             # =========================================================
-            PricelistItem = env['product.pricelist.item'].sudo()
-            total_created = total_updated = 0
-            try:
-                with cr.savepoint():
-                    if existing_pricelist:
-                        pricelist = existing_pricelist
-                        header_vals = {
-                            # supaya ikut sync ulang MC -> SS ke semua store
-                            'is_integrated': False,
-                            'index_store': [(5, 0, 0)],
-                        }
-                        if currency_id and currency_id != pricelist.currency_id.id:
-                            header_vals['currency_id'] = currency_id
-                        if data.get('vit_code'):
-                            header_vals['vit_code'] = str(data['vit_code']).strip()
-                        pricelist.write(header_vals)
+            all_pl_ids = list({
+                pl.id for (vit_code, cid) in pricelist_data
+                for pl in [get_pricelist(vit_code, cid)] if pl
+            })
 
-                        # Baris lama dicocokkan per (produk, min qty) -- 1 query untuk semua
-                        tmpl_ids = list({vals['product_tmpl_id'] for vals in items_lines_data})
-                        existing_items = {}
-                        for item in PricelistItem.search([('pricelist_id', '=', pricelist.id),
-                                                          ('product_tmpl_id', 'in', tmpl_ids)]):
-                            existing_items.setdefault((item.product_tmpl_id.id, item.min_quantity), item)
+            current_line_map = {}  # (pricelist_id, tmpl_id) -> line dict
+            if all_pl_ids:
+                all_relevant_tmpl_ids = set()
+                for d in pricelist_data.values():
+                    all_relevant_tmpl_ids.update(d['line_vals_map'].keys())
 
-                        to_create = []
-                        for vals in items_lines_data:
-                            key = (vals['product_tmpl_id'], float(vals['min_quantity'] or 0))
-                            item = existing_items.get(key)
-                            if item:
-                                # 'price' = field compute (label), tidak perlu di-write
-                                upd = {k: v for k, v in vals.items() if k != 'price'}
-                                upd['is_updated'] = True   # supaya baris ikut sync ulang ke SS
-                                item.write(upd)
-                                total_updated += 1
-                            else:
-                                to_create.append(dict(vals, pricelist_id=pricelist.id))
-                    else:
-                        pricelist = env['product.pricelist'].sudo().create({
-                            'name': name,
-                            'currency_id': currency_id,
-                            'vit_code': str(data['vit_code']).strip() if data.get('vit_code') else False,
-                            'create_uid': uid,   # sama seperti versi lama
+                FIELDS = ['id', 'pricelist_id', 'product_tmpl_id', 'fixed_price', 'percent_price',
+                          'compute_price', 'min_quantity', 'date_start', 'applied_on']
+                for chunk_tmpl in _chunks(all_relevant_tmpl_ids, PRODUCT_SEARCH_CHUNK):
+                    lines = PricelistItem.search_read([
+                        ('pricelist_id', 'in', all_pl_ids),
+                        ('product_tmpl_id', 'in', chunk_tmpl),
+                        '|', ('date_end', '=', False), ('date_end', '>=', now),
+                    ], fields=FIELDS, order='id desc')
+                    for line in lines:
+                        key = (line['pricelist_id'][0], line['product_tmpl_id'][0])
+                        current_line_map.setdefault(key, line)  # id terbaru
+
+            # =========================================================
+            # LANGKAH 7: Proses tiap pricelist (savepoint per pricelist)
+            # =========================================================
+            COMPARE_FIELDS = ['fixed_price', 'percent_price', 'compute_price', 'min_quantity', 'applied_on']
+
+            def _differs(old, new):
+                if isinstance(new, float):
+                    return abs((old or 0.0) - new) > 1e-6
+                return old != new
+
+            close_at = now - timedelta(seconds=1)
+
+            created_pricelists = []
+            updated_pricelists = []
+            failed_pricelists  = []
+            total_lines_created  = 0   # produk baru di pricelist
+            total_lines_replaced = 0   # harga berubah -> baris baru + lama ditutup
+
+            for pl_idx, ((vit_code, company_id), data_pl) in enumerate(pricelist_data.items()):
+                sp = f'pl_{pl_idx}'   # nama savepoint aman (vit_code bisa berisi karakter apa saja)
+                try:
+                    _savepoint(cr, sp)
+
+                    # --- Upsert header pricelist ---
+                    pl_rec = get_pricelist(vit_code, company_id)
+                    is_new_pl = not pl_rec
+                    if is_new_pl:
+                        pl_rec = Pricelist.create({
+                            'vit_code':    vit_code,
+                            'name':        data_pl['name'],
+                            'currency_id': data_pl['currency_id'],
+                            'company_id':  company_id,
+                            'active':      data_pl['active'],
                         })
-                        to_create = [dict(vals, pricelist_id=pricelist.id) for vals in items_lines_data]
+                        existing_pl_map[(vit_code, company_id)] = pl_rec
+                        header_vals = {}
+                    else:
+                        header_vals = {}
+                        if pl_rec.currency_id.id != data_pl['currency_id']:
+                            header_vals['currency_id'] = data_pl['currency_id']
+                        if pl_rec.name != data_pl['name']:
+                            header_vals['name'] = data_pl['name']
+                        if pl_rec.active != data_pl['active']:
+                            header_vals['active'] = data_pl['active']
 
+                    # --- Tentukan baris yang perlu di-INSERT & baris lama yang perlu DITUTUP ---
+                    to_create      = []
+                    to_close_ids   = []
+                    replaced_count = 0
+
+                    for tmpl_id, vals in data_pl['line_vals_map'].items():
+                        current = current_line_map.get((pl_rec.id, tmpl_id))
+                        if current and not any(_differs(current.get(f), vals.get(f)) for f in COMPARE_FIELDS):
+                            continue  # tidak berubah -> tidak ada baris baru
+
+                        to_create.append({
+                            'pricelist_id':    pl_rec.id,
+                            'product_tmpl_id': tmpl_id,
+                            **vals,
+                            'date_start':      now,
+                            'date_end':        date_end,
+                        })
+                        if current:
+                            to_close_ids.append(current['id'])
+                            replaced_count += 1
+
+                    # Ada perubahan -> tandai belum terintegrasi supaya ikut sync ulang ke store
+                    if not is_new_pl and (header_vals or to_create):
+                        header_vals.update({'is_integrated': False, 'index_store': [(5, 0, 0)]})
+                    if header_vals:
+                        pl_rec.write(header_vals)
+
+                    # --- Tutup baris lama (berakhir sesaat sebelum baris baru mulai).
+                    #     GREATEST: jaga date_end >= date_start. is_updated -> ikut sync ke store.
+                    if to_close_ids:
+                        cr.execute("""
+                            UPDATE product_pricelist_item
+                               SET date_end = GREATEST(COALESCE(date_start, %s), %s),
+                                   is_updated = TRUE,
+                                   write_date = (now() at time zone 'UTC')
+                             WHERE id IN %s
+                        """, (close_at, close_at, tuple(to_close_ids)))
+                        PricelistItem.browse(to_close_ids).invalidate_recordset(['date_end', 'is_updated'])
+
+                    # --- INSERT baris baru ---
                     for chunk in _chunks(to_create, LINE_CREATE_CHUNK):
-                        PricelistItem.create(chunk)
-                    total_created = len(to_create)
+                        new_lines = PricelistItem.create(chunk)
+                        # Daftarkan sebagai baris berlaku, supaya produk dobel
+                        # dalam payload yang sama tidak di-insert 2x
+                        for nl, vals in zip(new_lines, chunk):
+                            current_line_map[(pl_rec.id, nl.product_tmpl_id.id)] = {'id': nl.id, **vals}
 
-            except Exception as create_error:
-                _logger.error(f"Failed to create pricelist: {str(create_error)}", exc_info=True)
-                return {
-                    'status': "Failed",
-                    'code': 500,
-                    'message': f"Failed to create pricelist: {str(create_error)}"
-                }
+                    total_lines_created  += len(to_create) - replaced_count
+                    total_lines_replaced += replaced_count
 
+                    info = {
+                        'id':             pl_rec.id,
+                        'vit_code':       vit_code,
+                        'name':           pl_rec.name,
+                        'company_id':     company_id,
+                        'company_name':   data_pl['company_name'],
+                        'lines_created':  len(to_create) - replaced_count,
+                        'lines_replaced': replaced_count,
+                    }
+                    (created_pricelists if is_new_pl else updated_pricelists).append(info)
+
+                    _release(cr, sp)
+                    cr.commit()
+
+                except Exception as e:
+                    _rollback_to(cr, sp)
+                    _logger.error(f"Error processing {vit_code} for company {company_id}: {e}", exc_info=True)
+                    failed_pricelists.append({'vit_code': vit_code, 'company_id': company_id, 'message': str(e)})
+
+            cr.commit()
+
+            has_issue = bool(failed_pricelists or skipped)
             return {
-                'code': 200,
-                'status': 'success',
-                'message': ('Price List updated successfully' if existing_pricelist
-                            else 'Price List created successfully'),
-                'id': pricelist.id,
-                'name': pricelist.name,
-                'total_created_lines': total_created,
-                'total_updated_lines': total_updated,
+                'code':   200 if not has_issue else 207,
+                'status': 'success' if not has_issue else 'partial_success',
+                'total_companies_processed': len(companies),
+                'total_created_pricelists':  len(created_pricelists),
+                'total_updated_pricelists':  len(updated_pricelists),
+                'total_failed_pricelists':   len(failed_pricelists),
+                'total_lines_created':       total_lines_created,
+                'total_lines_replaced':      total_lines_replaced,
+                'total_skipped':             len(skipped),
+                'created_pricelists': created_pricelists,
+                'updated_pricelists': updated_pricelists,
+                'failed_pricelists':  failed_pricelists,
+                'skipped':            skipped,
             }
 
         except Exception as e:
             request.env.cr.rollback()
-            _logger.error(f"Failed to create Pricelist: {str(e)}", exc_info=True)
-            return {
-                'status': "Failed",
-                'code': 500,
-                'message': f"Failed to create Pricelist: {str(e)}"
-            }
-        
+            _logger.error(f"Pricelist API Fatal Error: {e}", exc_info=True)
+            return {'status': 'Failed', 'code': 500, 'message': str(e)}
+
+
 class POSTMasterUoM(http.Controller):
     @http.route('/api/master_uom', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_uom(self, **kw):
