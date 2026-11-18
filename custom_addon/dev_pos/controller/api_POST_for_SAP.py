@@ -1528,22 +1528,22 @@ class POSTMasterContact(http.Controller):
                 return pls
 
             def apply_pricelist(partner, pricelists):
-                """Pasang pricelist per company (specific_property_product_pricelist
+                """Pasang pricelist per company (property_product_pricelist
                 adalah field company-dependent). pricelists kosong = kosongkan."""
                 if not pricelists:
                     for company in companies:
-                        partner.with_company(company).specific_property_product_pricelist = False
+                        partner.with_company(company).property_product_pricelist = False
                     return
                 for company in companies:
                     pl = pricelists.filtered(lambda p: p.company_id == company)[:1] \
                         or pricelists.filtered(lambda p: not p.company_id)[:1]
                     if pl:
-                        partner.with_company(company).specific_property_product_pricelist = pl
+                        partner.with_company(company).property_product_pricelist = pl
 
             def pricelist_info(partner):
                 info = []
                 for company in companies:
-                    pl = partner.with_company(company).specific_property_product_pricelist
+                    pl = partner.with_company(company).property_product_pricelist
                     if pl:
                         info.append({
                             'company': company.name,
@@ -1562,6 +1562,7 @@ class POSTMasterContact(http.Controller):
                     'name': partner.name,
                     'vit_bp_type': partner.vit_bp_type,
                     'telp1': partner.phone,
+                    'telp2': partner.mobile,
                     'contactname': partner.function,
                     'email': partner.email,
                     'npwp': partner.vat,
@@ -1679,6 +1680,9 @@ class POSTMasterContact(http.Controller):
                     if contact_name is not None:
                         customer_vals['function'] = contact_name
 
+                    if 'telp2' in data:
+                        customer_vals['mobile'] = data.get('telp2')
+
                     # =====================================================
                     # CREATE OR UPDATE
                     # =====================================================
@@ -1731,42 +1735,458 @@ class POSTMasterWarehouse(http.Controller):
     @http.route('/api/master_warehouse', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_warehouse(self, **kw):
         try:
-            # Authentication
+            # Authentication (tetap cara lama)
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
                 return {'status': "Failed", 'code': 500, 'message': "Configuration not found."}
-            
+
             uid = request.session.authenticate(request.session.db, config.vit_config_username, config.vit_config_password_api)
             if not uid:
                 return {'status': "Failed", 'code': 401, 'message': "Authentication failed."}
 
             env = request.env(user=request.env.ref('base.user_admin').id)
-            
-            data = data = request.get_json_data()
-            code = data.get('code')
 
-            if env['stock.warehouse'].sudo().search([('code', '=', code)], limit=1):
-                return {'status': "Failed", 'code': 400, 'message': f"Duplicate Warehouse code: {code}"}
+            data = request.get_json_data()
+            # Format baru: {"items": [...]} ; format lama (1 objek di root) tetap didukung
+            items = data.get('items') if isinstance(data, dict) and 'items' in data else data
+            if isinstance(items, dict):
+                items = [items]
+            elif not isinstance(items, list):
+                return {'status': "Failed", 'code': 400, 'message': "'items' must be a list or object."}
+            if not items:
+                return {'status': "Failed", 'code': 400, 'message': "No items provided."}
 
-            warehouse_data = {
-                'name': data.get('name'),
-                'code': code,
-                'create_uid': uid
-            }
+            Warehouse = env['stock.warehouse'].sudo().with_context(active_test=False)
+            WH_FIELDS = Warehouse._fields
 
-            warehouse = env['stock.warehouse'].sudo().create(warehouse_data)
-            
+            def has_field(fname):
+                return fname in WH_FIELDS
+
+            def model_exists(model_name):
+                return model_name in env.registry
+
+            created, updated, failed = [], [], []
+
+            # ============================================================
+            # KUMPULKAN NILAI UNTUK BULK QUERY
+            # ============================================================
+            all_codes, all_names = set(), set()
+            all_regionals, all_brands, all_channel_groups = set(), set(), set()
+            all_default_customers, all_wh_type_names = set(), set()
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get('code'):              all_codes.add(item['code'])
+                if item.get('name'):              all_names.add(item['name'])
+                if item.get('regional'):          all_regionals.add(item['regional'])
+                if item.get('brand'):             all_brands.add(item['brand'])
+                if item.get('channel_group'):     all_channel_groups.add(item['channel_group'])
+                if item.get('vit_channel_group'): all_channel_groups.add(item['vit_channel_group'])
+                if item.get('customer'):          all_default_customers.add(item['customer'])
+                wt = item.get('warehouse_type')
+                if wt is not None and str(wt).strip():
+                    all_wh_type_names.add(str(wt).strip())
+
+            # ============================================================
+            # BULK QUERY (model pendukung hanya di-query kalau ADA di DB ini)
+            # ============================================================
+            map_warehouse_by_code = {r.code: r for r in Warehouse.search([('code', 'in', list(all_codes))])}
+            map_warehouse_by_name = {r.name: r for r in Warehouse.search([('name', 'in', list(all_names))])}
+
+            map_regional_by_code = {}
+            if all_regionals and has_field('vit_regional') and model_exists('vit.regional'):
+                for r in env['vit.regional'].sudo().search([('code', 'in', list(all_regionals))]):
+                    map_regional_by_code[r.code] = r
+
+            map_brand_by_name = {}
+            if all_brands and has_field('vit_brand'):
+                for r in env['product.category'].sudo().search([('name', 'in', list(all_brands))]):
+                    map_brand_by_name[r.name] = r
+
+            map_channel_group_by_name = {}
+            if all_channel_groups and has_field('vit_channel_group') and model_exists('master.channel.group'):
+                for r in env['master.channel.group'].sudo().search([('name', 'in', list(all_channel_groups))]):
+                    map_channel_group_by_name[r.name] = r
+
+            map_partner_by_vendor_code = {}
+            if all_default_customers and has_field('default_customer_id'):
+                for r in env['res.partner'].sudo().search([
+                    ('vit_customer_vendor_code', 'in', list(all_default_customers))
+                ]):
+                    map_partner_by_vendor_code[r.vit_customer_vendor_code] = r
+
+            map_wh_type_by_name = {}
+            if all_wh_type_names and has_field('vit_warehouse_type_id') and model_exists('master.warehouse.type'):
+                for t in env['master.warehouse.type'].sudo().search([('name', 'in', list(all_wh_type_names))]):
+                    map_wh_type_by_name[t.name] = t
+
+            # ============================================================
+            # HELPER: RESOLVE RELASI
+            # ============================================================
+            def resolve_regional_id(value):
+                if not value:
+                    return False
+                rec = map_regional_by_code.get(value)
+                if not rec:
+                    rec = env['vit.regional'].sudo().create({'code': value})
+                    map_regional_by_code[value] = rec
+                return rec.id
+
+            def resolve_channel_group_id(value):
+                if not value:
+                    return False
+                rec = map_channel_group_by_name.get(value)
+                if not rec:
+                    rec = env['master.channel.group'].sudo().create({'name': value})
+                    map_channel_group_by_name[value] = rec
+                return rec.id
+
+            def resolve_warehouse_type_id(value):
+                value_str = str(value).strip() if value is not None else ''
+                if not value_str:
+                    return False
+                rec = map_wh_type_by_name.get(value_str)
+                if not rec:
+                    rec = env['master.warehouse.type'].sudo().create({'name': value_str})
+                    map_wh_type_by_name[value_str] = rec
+                return rec.id
+
+            # ============================================================
+            # HELPER: TRANSIT LOCATION per warehouse
+            # ============================================================
+            def ensure_transit_location(wh):
+                """Pastikan warehouse punya lokasi Transit di bawah view location-nya,
+                lalu isi field location_transit (kalau field-nya ada & masih kosong)."""
+                try:
+                    parent_location = wh.view_location_id or (
+                        wh.lot_stock_id.location_id if wh.lot_stock_id else False
+                    )
+                    if not parent_location:
+                        _logger.warning(f"ensure_transit_location: Warehouse '{wh.name}' ({wh.code}) "
+                                        f"tidak punya view_location_id / lot_stock_id. Skip.")
+                        return False
+
+                    TransitLoc = env['stock.location'].sudo().with_context(active_test=False)
+                    transit = TransitLoc.search([
+                        ('usage', '=', 'transit'),
+                        ('location_id', '=', parent_location.id),
+                    ], limit=1)
+                    if transit and not transit.active:
+                        transit.write({'active': True})
+                    if not transit:
+                        transit = TransitLoc.create({
+                            'name': 'Transit',
+                            'usage': 'transit',
+                            'location_id': parent_location.id,
+                            'active': True,
+                            'company_id': wh.company_id.id if wh.company_id else False,
+                        })
+                        _logger.info(f"ensure_transit_location: Created transit location for "
+                                     f"'{wh.name}' ({wh.code}), location id={transit.id}")
+
+                    if has_field('location_transit') and not wh.location_transit:
+                        wh.write({'location_transit': transit.id})
+                    return transit.id
+                except Exception as e:
+                    _logger.error(f"ensure_transit_location: Gagal untuk warehouse "
+                                  f"'{wh.name}' ({wh.code}): {e}")
+                    return False
+
+            # ============================================================
+            # HELPER: RENAME RECEIPTS WAREHOUSE -> GRPO
+            # ============================================================
+            RECEIPTS_NAME = 'GRPO'
+
+            def rename_receipts(wh):
+                """Operation type Receipts bawaan warehouse (in_type_id) diberi
+                nama GRPO. Hanya nama yang diubah; sequence tetap."""
+                try:
+                    receipts = wh.in_type_id
+                    if receipts and receipts.name != RECEIPTS_NAME:
+                        # is_integrated=False -> data_integrator ikut me-rename
+                        # 'Receipts' jadi 'GRPO' di Store Server
+                        receipts.sudo().write({'name': RECEIPTS_NAME, 'is_integrated': False})
+                except Exception as e:
+                    _logger.error(f"rename_receipts: gagal untuk warehouse '{wh.name}' ({wh.code}): {e}")
+
+            # ============================================================
+            # HELPER: OPERATION TYPE GLOBAL (TANPA WAREHOUSE)
+            #   Dipakai oleh API Goods Receipt / Goods Issue / dll yang mencari
+            #   picking type lewat NAMA persis, jadi warehouse_id dikosongkan.
+            #   Dibuat 1x per company (idempotent): kalau sudah ada -> tidak diubah,
+            #   kalau diarsipkan -> diaktifkan lagi.
+            # ============================================================
+            GLOBAL_OPERATION_TYPES = [
+                # (name,            code Odoo,  sequence_code)
+                ('Goods Receipts', 'incoming', 'GR'),
+                ('Goods Issue',    'outgoing', 'GI'),
+                ('Transfer In',    'internal', 'TSIN'),
+                ('Transfer Out',   'internal', 'TSOT'),
+            ]
+            optype_done_companies = {}   # company_id -> hasil (supaya hanya dicek 1x per request)
+
+            def ensure_global_operation_types(company):
+                if company.id in optype_done_companies:
+                    return optype_done_companies[company.id]
+
+                PickingType = env['stock.picking.type'].sudo().with_context(active_test=False)
+                Sequence = env['ir.sequence'].sudo()
+                result = []
+                for name, code_type, seq_code in GLOBAL_OPERATION_TYPES:
+                    try:
+                        with env.cr.savepoint():
+                            rec = PickingType.search([
+                                ('name', '=', name),
+                                ('warehouse_id', '=', False),
+                                ('company_id', '=', company.id),
+                            ], limit=1)
+                            if rec:
+                                action = 'exists'
+                                if not rec.active:
+                                    rec.write({'active': True})
+                                    action = 'unarchived'
+                            else:
+                                # Sequence sendiri: GR/2026/00001 (reset per tahun;
+                                # date range per tahun dibuat otomatis oleh Odoo)
+                                seq = Sequence.create({
+                                    'name': f"{name} Sequence",
+                                    'prefix': f"{seq_code}/%(range_year)s/",
+                                    'padding': 5,
+                                    'use_date_range': True,
+                                    'company_id': company.id,
+                                })
+                                rec = PickingType.create({
+                                    'name': name,
+                                    'code': code_type,
+                                    'sequence_code': seq_code,
+                                    'sequence_id': seq.id,
+                                    'warehouse_id': False,
+                                    'company_id': company.id,
+                                })
+                                action = 'created'
+                        result.append({'id': rec.id, 'name': name, 'type': code_type,
+                                       'company': company.name, 'action': action})
+                    except Exception as e:
+                        _logger.error(f"ensure_global_operation_types: gagal '{name}' "
+                                      f"(company {company.name}): {e}")
+                        result.append({'id': None, 'name': name, 'type': code_type,
+                                       'company': company.name, 'action': 'failed', 'message': str(e)})
+
+                optype_done_companies[company.id] = result
+                return result
+
+            # ============================================================
+            # HELPER: RESPONSE PER WAREHOUSE
+            # ============================================================
+            def fval(wh, fname, attr=None):
+                if not has_field(fname):
+                    return False
+                val = wh[fname]
+                if attr:
+                    return val[attr] if val else False
+                return val or False
+
+            def build_result(wh, action, ignored=None):
+                res = {
+                    'id':               wh.id,
+                    'location_id':      wh.lot_stock_id.id if wh.lot_stock_id else False,
+                    'location_transit': fval(wh, 'location_transit', 'id'),
+                    'code':             wh.code,
+                    'name':             wh.name,
+                    'active':           wh.active,
+                    'store_code':       fval(wh, 'vit_store_code'),
+                    'warehouse_type':   fval(wh, 'vit_warehouse_type_id', 'name'),
+                    'est_pengiriman':   fval(wh, 'vit_est_pengiriman'),
+                    'channel_group':    fval(wh, 'vit_channel_group', 'name'),
+                    'blok':             fval(wh, 'vit_blok'),
+                    'regional':         fval(wh, 'vit_regional', 'code'),
+                    'customer':         fval(wh, 'vit_customer'),
+                    'brand':            fval(wh, 'vit_brand', 'name'),
+                    'max_itr':          fval(wh, 'vit_max_itr'),
+                    'street':           fval(wh, 'vit_street'),
+                    'city':             fval(wh, 'vit_city'),
+                    'zip_code':         fval(wh, 'vit_zip_code'),
+                    'county':           fval(wh, 'vit_county'),
+                    'country':          fval(wh, 'vit_country'),
+                    'default_customer': fval(wh, 'default_customer_id', 'vit_customer_vendor_code'),
+                    'is_send_to_store': fval(wh, 'is_send_to_store'),
+                    'is_send_to_wms':   fval(wh, 'is_send_to_wms'),
+                    'action':           action,
+                }
+                if ignored:
+                    # field payload yang tidak ada di database ini -> dilewati
+                    res['ignored_fields'] = ignored
+                return res
+
+            # Payload key -> field stock.warehouse untuk nilai sederhana
+            SIMPLE_FIELDS = [
+                ('store_code',       'vit_store_code',   None),
+                ('blok',             'vit_blok',         None),
+                ('customer',         'vit_customer',     None),
+                ('street',           'vit_street',       None),
+                ('city',             'vit_city',         None),
+                ('zip_code',         'vit_zip_code',     None),
+                ('county',           'vit_county',       None),
+                ('country',          'vit_country',      None),
+                ('max_itr',          'vit_max_itr',      float),
+                ('active',           'active',           None),
+                ('is_send_to_store', 'is_send_to_store', bool),
+                ('is_send_to_wms',   'is_send_to_wms',   bool),
+            ]
+
+            # ============================================================
+            # LOOP ITEMS (savepoint per item: item gagal tidak membatalkan item lain)
+            # ============================================================
+            for item in items:
+                code = name = None
+                try:
+                    if not isinstance(item, dict):
+                        failed.append({'data': item, 'message': "Item must be an object.", 'id': None})
+                        continue
+
+                    with env.cr.savepoint():
+                        code = item.get('code')
+                        name = item.get('name')
+                        if not code:
+                            failed.append({'data': item, 'message': "Field 'code' is required.", 'id': None})
+                            continue
+                        if not name:
+                            failed.append({'data': item, 'message': "Field 'name' is required.", 'id': None})
+                            continue
+
+                        values = {'name': name}
+                        ignored = []
+
+                        # --- nilai sederhana ---
+                        for payload_key, fname, cast in SIMPLE_FIELDS:
+                            if payload_key not in item or item[payload_key] is None:
+                                continue
+                            if not has_field(fname):
+                                ignored.append(payload_key)
+                                continue
+                            val = item[payload_key]
+                            values[fname] = cast(val) if cast and val != '' else val
+
+                        # est_pengiriman (dua nama key)
+                        est = item.get('est_pengiriman', item.get('vit_est_pengiriman'))
+                        if est is not None:
+                            if has_field('vit_est_pengiriman'):
+                                values['vit_est_pengiriman'] = float(est or 0)
+                            else:
+                                ignored.append('est_pengiriman')
+
+                        # --- warehouse_type (auto-create) ---
+                        if 'warehouse_type' in item:
+                            if has_field('vit_warehouse_type_id') and model_exists('master.warehouse.type'):
+                                values['vit_warehouse_type_id'] = resolve_warehouse_type_id(item['warehouse_type'])
+                            else:
+                                ignored.append('warehouse_type')
+
+                        # --- regional (auto-create) ---
+                        if 'regional' in item:
+                            if has_field('vit_regional') and model_exists('vit.regional'):
+                                values['vit_regional'] = resolve_regional_id(item['regional'])
+                            else:
+                                ignored.append('regional')
+
+                        # --- channel_group (auto-create, dua nama key) ---
+                        cg_key = 'channel_group' if 'channel_group' in item else (
+                            'vit_channel_group' if 'vit_channel_group' in item else None)
+                        if cg_key:
+                            if has_field('vit_channel_group') and model_exists('master.channel.group'):
+                                values['vit_channel_group'] = resolve_channel_group_id(item[cg_key])
+                            else:
+                                ignored.append(cg_key)
+
+                        # --- brand (wajib sudah ada di product.category) ---
+                        if 'brand' in item:
+                            if not has_field('vit_brand'):
+                                ignored.append('brand')
+                            elif item['brand']:
+                                brand_rec = map_brand_by_name.get(item['brand'])
+                                if not brand_rec:
+                                    failed.append({'data': item, 'id': None,
+                                                   'message': f"Brand '{item['brand']}' not found in product.category"})
+                                    continue
+                                values['vit_brand'] = brand_rec.id
+                            else:
+                                values['vit_brand'] = False
+
+                        # --- default customer (by vit_customer_vendor_code) ---
+                        if 'customer' in item and has_field('default_customer_id'):
+                            partner_rec = map_partner_by_vendor_code.get(item['customer']) if item['customer'] else None
+                            values['default_customer_id'] = partner_rec.id if partner_rec else False
+
+                        existing = map_warehouse_by_code.get(code)
+
+                        if existing:
+                            # ---------------- UPDATE / ARCHIVE ----------------
+                            if name != existing.name:
+                                conflict = map_warehouse_by_name.get(name)
+                                if conflict and conflict.id != existing.id:
+                                    failed.append({'data': item, 'id': None,
+                                                   'message': f"Warehouse name '{name}' already exists (code: '{conflict.code}')"})
+                                    continue
+
+                            existing.write(values)
+                            wh, action = existing, (
+                                'archived'   if item.get('active') is False else
+                                'unarchived' if item.get('active') is True else
+                                'updated')
+                        else:
+                            # ---------------- CREATE ----------------
+                            duplicate_name = map_warehouse_by_name.get(name)
+                            if duplicate_name:
+                                failed.append({'data': item, 'id': None,
+                                               'message': f"Warehouse name '{name}' already exists (code: '{duplicate_name.code}')"})
+                                continue
+
+                            values.update({'code': code, 'create_uid': uid})
+                            wh = env['stock.warehouse'].sudo().create(values)
+                            action = 'created'
+                            map_warehouse_by_code[code] = wh
+
+                        map_warehouse_by_name[wh.name] = wh
+                        ensure_transit_location(wh)
+                        rename_receipts(wh)
+                        ensure_global_operation_types(wh.company_id or env.company)
+
+                        (created if action == 'created' else updated).append(
+                            build_result(wh, action, ignored))
+
+                except Exception as e:
+                    # savepoint sudah rollback HANYA item ini
+                    error_msg = str(e)
+                    if 'stock_warehouse_warehouse_name_uniq' in error_msg:
+                        error_msg = f"Warehouse name '{name}' already exists"
+                    elif 'stock_warehouse_code_uniq' in error_msg or 'duplicate key' in error_msg.lower():
+                        error_msg = f"Warehouse code '{code}' already exists"
+                    failed.append({'data': item, 'message': error_msg, 'id': None})
+
+            # ============================================================
+            # RESPONSE
+            # ============================================================
+            total = len(created) + len(updated) + len(failed)
+            has_err = bool(failed)
+            operation_types = [ot for res in optype_done_companies.values() for ot in res]
+
             return {
-                'code': 200,
-                'status': 'success',
-                'message': 'Warehouse created successfully',
-                'id': warehouse.id,
+                'code':    207 if has_err and (created or updated) else (400 if has_err else 200),
+                'status':  'partial_success' if has_err and (created or updated) else ('failed' if has_err else 'success'),
+                'message': f"Processed {total} item(s): {len(created)} created, {len(updated)} updated, {len(failed)} failed.",
+                'summary': {'total': total, 'created': len(created), 'updated': len(updated), 'failed': len(failed)},
+                'created': created,
+                'updated': updated,
+                'failed':  failed,
+                'operation_types': operation_types,
             }
+
         except Exception as e:
             request.env.cr.rollback()
-            _logger.error(f"Failed to create Warehouse: {str(e)}")
-            return {'status': "Failed", 'code': 500, 'message': f"Failed to create Warehouse: {str(e)}"}
-    
+            _logger.error(f"Failed to process Warehouse: {str(e)}", exc_info=True)
+            return {'status': "Failed", 'code': 500, 'message': f"Server error: {str(e)}"}
+
 class POSTItemCategory(http.Controller):
     @http.route('/api/item_category', type='json', auth='none', methods=['POST'], csrf=False)
     def post_item_group(self, **kw):
