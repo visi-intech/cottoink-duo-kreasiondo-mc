@@ -1528,22 +1528,22 @@ class POSTMasterContact(http.Controller):
                 return pls
 
             def apply_pricelist(partner, pricelists):
-                """Pasang pricelist per company (specific_property_product_pricelist
+                """Pasang pricelist per company (property_product_pricelist
                 adalah field company-dependent). pricelists kosong = kosongkan."""
                 if not pricelists:
                     for company in companies:
-                        partner.with_company(company).specific_property_product_pricelist = False
+                        partner.with_company(company).property_product_pricelist = False
                     return
                 for company in companies:
                     pl = pricelists.filtered(lambda p: p.company_id == company)[:1] \
                         or pricelists.filtered(lambda p: not p.company_id)[:1]
                     if pl:
-                        partner.with_company(company).specific_property_product_pricelist = pl
+                        partner.with_company(company).property_product_pricelist = pl
 
             def pricelist_info(partner):
                 info = []
                 for company in companies:
-                    pl = partner.with_company(company).specific_property_product_pricelist
+                    pl = partner.with_company(company).property_product_pricelist
                     if pl:
                         info.append({
                             'company': company.name,
@@ -1562,6 +1562,7 @@ class POSTMasterContact(http.Controller):
                     'name': partner.name,
                     'vit_bp_type': partner.vit_bp_type,
                     'telp1': partner.phone,
+                    'telp2': partner.mobile,
                     'contactname': partner.function,
                     'email': partner.email,
                     'npwp': partner.vat,
@@ -1678,6 +1679,9 @@ class POSTMasterContact(http.Controller):
                     contact_name = data.get('contactname')
                     if contact_name is not None:
                         customer_vals['function'] = contact_name
+
+                    if 'telp2' in data:
+                        customer_vals['mobile'] = data.get('telp2')
 
                     # =====================================================
                     # CREATE OR UPDATE
