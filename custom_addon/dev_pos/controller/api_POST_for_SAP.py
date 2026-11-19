@@ -2177,10 +2177,15 @@ class POSTMasterWarehouse(http.Controller):
                             partner_rec = map_partner_by_vendor_code.get(item['customer']) if item['customer'] else None
                             values['default_customer_id'] = partner_rec.id if partner_rec else False
 
-                        existing = map_warehouse_by_code.get(code)
+                        # Cari by code; kalau tidak ketemu, by nama (warehouse lama yang
+                        # kodenya terpotong 5 karakter) -> di-update. Kode warehouse lama
+                        # TIDAK diganti: mengganti code ikut me-rename lokasi (CANUG/Stock ->
+                        # CANUGRAH/Stock), padahal sync MC<->SS mencocokkan lokasi via nama.
+                        existing = map_warehouse_by_code.get(code) or map_warehouse_by_name.get(name)
 
                         if existing:
                             # ---------------- UPDATE / ARCHIVE ----------------
+                            was_active = existing.active
                             if name != existing.name:
                                 conflict = map_warehouse_by_name.get(name)
                                 if conflict and conflict.id != existing.id:
@@ -2189,9 +2194,10 @@ class POSTMasterWarehouse(http.Controller):
                                     continue
 
                             existing.write(values)
+                            map_warehouse_by_code[code] = existing
                             wh, action = existing, (
-                                'archived'   if item.get('active') is False else
-                                'unarchived' if item.get('active') is True else
+                                'archived'   if item.get('active') is False and was_active else
+                                'unarchived' if item.get('active') is True and not was_active else
                                 'updated')
                         else:
                             # ---------------- CREATE ----------------
