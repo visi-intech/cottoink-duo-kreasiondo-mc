@@ -1192,87 +1192,127 @@ class MasterLocationAPI(http.Controller):
         
 class MasterOperationType(http.Controller):
     @http.route(['/api/master_operation_type/'], type='http', auth='public', methods=['GET'], csrf=False)
-    def master_operation_type_get(self, createdDateFrom=None, createdDateTo=None, pageSize=200, page=1, q=None, **params):
+    def master_operation_type_get(self, createdDateFrom=None, createdDateTo=None, pageSize=200, page=1,
+                                  location=None, company_id=None, active=None, q=None, **params):
         try:
             check_authorization()
-
-            # if not q and (not createdDateFrom or not createdDateTo or not pageSize or not page):
-            #     raise ValidationError("One or more required parameters are missing.")
 
             if int(page) == 0:
                 return serialize_response([], 0, 0)
 
             date_format = '%Y-%m-%d'
-            domain = []  # Initialize domain here
+            domain = [('usage', '=', 'internal')]
+            pageSize = int(pageSize) if pageSize else 200
 
+            # q mencari berdasarkan nama warehouse (via lot_stock_id), location name, atau warehouse code
             if q:
-                domain += [('name', 'ilike', str(q))]
+                matching_wh = request.env['stock.warehouse'].sudo().search([
+                    '|', '|',
+                    ('name', 'ilike', q),
+                    ('code', 'ilike', q),
+                    ('lot_stock_id.complete_name', 'ilike', q),
+                ])
+                matched_loc_ids = matching_wh.mapped('lot_stock_id').ids
+                loc_name_match = request.env['stock.location'].sudo().search([
+                    ('usage', '=', 'internal'),
+                    ('complete_name', 'ilike', q),
+                ]).ids
+                all_matched = list(set(matched_loc_ids + loc_name_match))
+                if not all_matched:
+                    return serialize_response([], 0, 0)
+                domain.append(('id', 'in', all_matched))
 
-            if not createdDateFrom and not createdDateTo and not q:
-                operation_type_data = request.env['stock.picking.type'].sudo().search(domain)
-                total_records = len(operation_type_data)
-            else:
-                if createdDateFrom or createdDateTo:
-                    created_date_from = fields.Date.from_string(createdDateFrom) if createdDateFrom else fields.Date.today()
-                    created_date_to = fields.Date.from_string(createdDateTo) if createdDateTo else fields.Date.today()
+            if location:
+                domain += ['&', ('complete_name', 'ilike', '/Stock'), ('complete_name', 'ilike', str(location))]
 
-                    domain += [('create_date', '>=', created_date_from.strftime(date_format)),
-                          ('create_date', '<=', created_date_to.strftime(date_format))]
+            if company_id is not None:
+                try:
+                    domain.append(('company_id', '=', int(company_id)))
+                except ValueError:
+                    return serialize_response([], 0, 0)
 
-                pageSize = int(pageSize) if pageSize else 200
+            if createdDateFrom or createdDateTo:
+                created_date_from = fields.Date.from_string(createdDateFrom) if createdDateFrom else fields.Date.today()
+                created_date_to   = fields.Date.from_string(createdDateTo)   if createdDateTo   else fields.Date.today()
+                domain += [
+                    ('create_date', '>=', created_date_from.strftime(date_format)),
+                    ('create_date', '<=', created_date_to.strftime(date_format)),
+                ]
 
-            if not q:  # Check if q is provided
-                operation_type_data, total_records = paginate_records('stock.picking.type', domain, pageSize, page)
-            else:
-                operation_type_data = request.env['stock.picking.type'].sudo().search(domain)
-                total_records = len(operation_type_data)
+            if active is not None:
+                active_str = str(active).strip().lower()
+                if active_str == 'false':
+                    domain.append(('active', '=', False))
+                elif active_str == 'all':
+                    domain.append(('active', 'in', [True, False]))
+                else:
+                    domain.append(('active', '=', True))
 
-            data_master_operation_type = []
+            location_data, total_records = paginate_records('stock.location', domain, pageSize, page)
+
+            location_ids = location_data.ids
+
+            warehouses = request.env['stock.warehouse'].sudo().search([
+                ('lot_stock_id', 'in', location_ids)
+            ])
+            warehouse_by_loc = {wh.lot_stock_id.id: wh for wh in warehouses}
+
+            picking_types = request.env['stock.picking.type'].sudo().search([
+                ('default_location_src_id', 'in', location_ids)
+            ])
+            picking_types_by_loc = {}
+            for pt in picking_types:
+                loc_id = pt.default_location_src_id.id
+                picking_types_by_loc.setdefault(loc_id, []).append(pt)
+
+            data_master_location = []
             jakarta_tz = pytz.timezone('Asia/Jakarta')
-            for op in operation_type_data:
-                create_date_utc =op.create_date
-                create_date_jakarta = pytz.utc.localize(create_date_utc).astimezone(jakarta_tz)
-                operations_data = {
-                    'id': op.id,
-                    'name': op.name,
-                    'code': op.code,
-                    'create_date': str(create_date_jakarta),
-                    'sequence_id': op.sequence_id.id,
-                    'sequence': op.sequence_id.name,
-                    'sequence_code': op.sequence_code,
-                    'warehouse_id': op.warehouse_id.id,
-                    'warehouse': op.warehouse_id.name,
-                    'warehouse_code': op.code,
-                    'return_picking_type_id': op.return_picking_type_id.id,
-                    'return_picking_type': op.return_picking_type_id.name,
-                    'default_location_return_id': op.default_location_return_id.id,
-                    'default_location_return': op.default_location_return_id.complete_name,
-                    'create_backorder': op.create_backorder,
-                    'default_location_src_id': op.default_location_src_id.id,
-                    'default_location_src': op.default_location_src_id.complete_name,
-                    'default_location_dest_id': op.default_location_dest_id.id,
-                    'default_location_dest': op.default_location_dest_id.complete_name,       
-                }
-                data_master_operation_type.append(operations_data)
 
-            if not createdDateFrom and not createdDateTo and not q:
-                total_records = len(data_master_operation_type)
+            for loc in location_data:
+                create_date_jakarta = pytz.utc.localize(loc.create_date).astimezone(jakarta_tz)
+
+                wh = warehouse_by_loc.get(loc.id)
+                warehouse_info = {
+                    'warehouse_id'  : wh.id   if wh else None,
+                    'warehouse_name': wh.name if wh else "",
+                    'warehouse_code': wh.code if wh else "",
+                }
+
+                pts = picking_types_by_loc.get(loc.id, [])
+                operation_types = [
+                    {
+                        'operation_type_id'  : pt.id,
+                        'operation_type_name': pt.name,
+                        'operation_type_code': pt.code,
+                    }
+                    for pt in pts
+                ]
+
+                data_master_location.append({
+                    'id'            : loc.id,
+                    'name'          : loc.complete_name,
+                    'active'        : loc.active,
+                    'create_date'   : str(create_date_jakarta),
+                    'location_id'   : loc.location_id.id   if loc.location_id else None,
+                    'location'      : loc.location_id.name if loc.location_id else "",
+                    'usage'         : loc.usage,
+                    'company_id'    : loc.company_id.id    if loc.company_id  else None,
+                    'company_name'  : loc.company_id.name  if loc.company_id  else "",
+                    **warehouse_info,
+                    'operation_types': operation_types,
+                })
 
             total_pages = (total_records + pageSize - 1) // pageSize
+            return serialize_response(data_master_location, total_records, total_pages)
 
-            return serialize_response(data_master_operation_type, total_records, total_pages)
-        
-        except ValidationError as ve:
-            # If any required parameter is missing, return HTTP 500 error
-            error_response = {
-                'error': 'One or more required parameters are missing.',
-                'status': 500
-            }
-            return http.Response(json.dumps(error_response), content_type='application/json', status=500)
-
+        except ValidationError:
+            return http.Response(
+                json.dumps({'error': 'One or more required parameters are missing.', 'status': 500}),
+                content_type='application/json', status=500
+            )
         except Exception as e:
             return serialize_error_response(str(e))
-        
+
 class MasterProductItemAPI(http.Controller):
     @http.route(['/api/master_item/'], type='http', auth='public', methods=['GET'], csrf=False)
     def master_product_get(self, createdDateFrom=None, createdDateTo=None, pageSize=200, page=1, q=None, is_integrated=None, **params):
