@@ -6,8 +6,7 @@ from datetime import datetime
 import json
 import logging
 import base64
-from odoo.exceptions import AccessError, UserError
-from odoo.tools import float_compare
+from odoo.exceptions import AccessError
 import werkzeug.exceptions
 from .api_utils import check_authorization
 from ..models.merchandise_category import MERCHANDISE_CATEGORY_FIELDS, MERCHANDISE_CATEGORY_LEGACY_KEYS
@@ -2661,11 +2660,144 @@ class POSTGoodsReceipt(http.Controller):
     @http.route('/api/goods_receipt', type='json', auth='none', methods=['POST'], csrf=False)
     def post_goods_receipt(self, **kw):
         try:
-            env, uid, error = _stock_doc_auth()
-            if error:
-                return error
-            return _process_stock_documents(env, uid, request.get_json_data(),
-                                            'Goods Receipts', 'Goods Receipt', swap_header_location=True)
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
+            # Authentication
+            config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
+            if not config:
+                return {'status': "Failed", 'code': 500, 'message': "Configuration not found."}
+            
+            uid = request.session.authenticate(request.session.db, config.vit_config_username, config.vit_config_password_api)
+            if not uid:
+                return {'status': "Failed", 'code': 401, 'message': "Authentication failed."}
+
+            env = request.env(user=request.env.ref('base.user_admin').id)
+            
+            data = request.get_json_data()
+            picking_type_name = data.get('picking_type')
+            location_id = data.get('location_id')
+            location_dest_id = data.get('location_dest_id')
+            scheduled_date = data.get('scheduled_date')
+            date_done = data.get('date_done')
+            transaction_id = data.get('transaction_id')
+            move_type = data.get('move_type')
+            move_lines = data.get('move_lines', [])
+
+            # Validate if Goods Receipt already exists
+            existing_goods_receipts = env['stock.picking'].sudo().search([
+                ('vit_trxid', '=', transaction_id), 
+                ('picking_type_id.name', '=', 'Goods Receipts')
+            ], limit=1)
+            
+            if existing_goods_receipts:   
+                return {
+                    'code': 400,
+                    'status': 'failed',
+                    'message': 'Goods Receipt already exists',
+                    'id': existing_goods_receipts.id,
+                    'doc_num': existing_goods_receipts.name
+                }
+
+            # Validate picking type
+            picking_type = env['stock.picking.type'].sudo().search([('name', '=', picking_type_name)], limit=1)
+            if not picking_type:
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Picking type '{picking_type_name}' not found."
+                }
+
+            # Validate locations
+            source_location = env['stock.location'].sudo().browse(location_id)
+            dest_location = env['stock.location'].sudo().browse(location_dest_id)
+            
+            if not source_location.exists():
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Source location with ID {location_id} not found."
+                }
+            
+            if not dest_location.exists():
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Destination location with ID {location_dest_id} not found."
+                }
+
+            # Validate all products first before creating Goods Receipt
+            missing_products = []
+            for line in move_lines:
+                product_code = line.get('product_code')
+                product_id = env['product.product'].sudo().search([('default_code', '=', product_code)], limit=1)
+                if not product_id:
+                    missing_products.append(product_code)
+
+            if missing_products:
+                return {
+                    'status': "Failed",
+                    'code': 400,
+                    'message': f"Products with codes {', '.join(missing_products)} not found. Goods Receipt creation cancelled."
+                }
+
+            # Create Goods Receipt
+            goods_receipt = env['stock.picking'].sudo().create({
+                'picking_type_id': picking_type.id,
+                'location_id': location_dest_id,
+                'location_dest_id': location_id,
+                'move_type': move_type,
+                'scheduled_date': scheduled_date,
+                'date_done': date_done,
+                'vit_trxid': transaction_id,
+                'create_uid': uid,
+                # 'immediate_transfer': True  # Added to ensure immediate transfer
+            })
+
+            # Create move lines
+            move_line_vals = []
+            for line in move_lines:
+                product_code = line.get('product_code')
+                product_uom_qty = line.get('product_uom_qty')
+                product_id = env['product.product'].sudo().search([('default_code', '=', product_code)], limit=1)
+
+                move_vals = {
+                    'name': product_id.name,
+                    'product_id': product_id.id,
+                    'product_uom': product_id.uom_id.id,  # Added product UOM
+                    'product_uom_qty': float(product_uom_qty),
+                    'quantity': float(product_uom_qty),  # Added to ensure validation
+                    'picking_id': goods_receipt.id,
+                    'location_id': location_id,
+                    'location_dest_id': location_dest_id,
+                    'state': 'draft',
+                }
+                move_line_vals.append((0, 0, move_vals))
+
+            # Update goods receipt with move lines
+            goods_receipt.write({
+                'move_ids_without_package': move_line_vals
+            })
+
+            try:
+                # Validate the goods receipt
+                goods_receipt.button_validate()
+            except Exception as validate_error:
+                env.cr.rollback()
+                # If validation fails, delete the goods receipt and return error
+                goods_receipt.sudo().unlink()
+                raise Exception(f"Failed to validate Goods Receipt: {str(validate_error)}")
+
+            return {
+                'code': 200,
+                'status': 'success',
+                'message': 'Goods Receipt created and validated successfully',
+                'id': goods_receipt.id,
+                'doc_num': goods_receipt.name
+            }
+
         except Exception as e:
             request.env.cr.rollback()
             _logger.error(f"Failed to create Goods Receipt: {str(e)}", exc_info=True)
@@ -2676,11 +2808,144 @@ class POSTGoodsIssue(http.Controller):
     @http.route('/api/goods_issue', type='json', auth='none', methods=['POST'], csrf=False)
     def post_goods_issue(self, **kw):
         try:
-            env, uid, error = _stock_doc_auth()
-            if error:
-                return error
-            return _process_stock_documents(env, uid, request.get_json_data(),
-                                            'Goods Issue', 'Goods Issue', swap_header_location=False)
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
+            # Authentication
+            config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
+            if not config:
+                return {'status': "Failed", 'code': 500, 'message': "Configuration not found."}
+            
+            uid = request.session.authenticate(request.session.db, config.vit_config_username, config.vit_config_password_api)
+            if not uid:
+                return {'status': "Failed", 'code': 401, 'message': "Authentication failed."}
+
+            env = request.env(user=request.env.ref('base.user_admin').id)
+            
+            data = request.get_json_data()
+            picking_type_name = data.get('picking_type')
+            location_id = data.get('location_id')
+            location_dest_id = data.get('location_dest_id')
+            scheduled_date = data.get('scheduled_date')
+            date_done = data.get('date_done')
+            transaction_id = data.get('transaction_id')
+            move_type = data.get('move_type')
+            move_lines = data.get('move_lines', [])
+
+            # Validate if Goods Issue already exists
+            existing_goods_issue = env['stock.picking'].sudo().search([
+                ('vit_trxid', '=', transaction_id), 
+                ('picking_type_id.name', '=', 'Goods Issue')
+            ], limit=1)
+            
+            if existing_goods_issue:    
+                return {
+                    'code': 400,
+                    'status': 'failed',
+                    'message': 'Goods Issue already exists',
+                    'id': existing_goods_issue.id,
+                    'doc_num': existing_goods_issue.name
+                }         
+
+            # Validate picking type
+            picking_type = env['stock.picking.type'].sudo().search([('name', '=', picking_type_name)], limit=1)
+            if not picking_type:
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Picking type '{picking_type_name}' not found."
+                }
+
+            # Validate locations
+            source_location = env['stock.location'].sudo().browse(location_id)
+            dest_location = env['stock.location'].sudo().browse(location_dest_id)
+            
+            if not source_location.exists():
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Source location with ID {location_id} not found."
+                }
+            
+            if not dest_location.exists():
+                return {
+                    'status': "Failed", 
+                    'code': 400, 
+                    'message': f"Destination location with ID {location_dest_id} not found."
+                }
+
+            # Validate all products first before creating Goods Issue
+            missing_products = []
+            for line in move_lines:
+                product_code = line.get('product_code')
+                product_id = env['product.product'].sudo().search([('default_code', '=', product_code)], limit=1)
+                if not product_id:
+                    missing_products.append(product_code)
+
+            if missing_products:
+                return {
+                    'status': "Failed",
+                    'code': 400,
+                    'message': f"Products with codes {', '.join(missing_products)} not found. Goods Issue creation cancelled."
+                }
+
+            # Create Goods Issue
+            goods_issue = env['stock.picking'].sudo().create({
+                'picking_type_id': picking_type.id,
+                'location_id': location_id,
+                'location_dest_id': location_dest_id,
+                'move_type': move_type,
+                'scheduled_date': scheduled_date,
+                'date_done': date_done,
+                'vit_trxid': transaction_id,
+                'create_uid': uid,
+                # 'immediate_transfer': True  # Added to ensure immediate transfer
+            })
+
+            # Create move lines
+            move_line_vals = []
+            for line in move_lines:
+                product_code = line.get('product_code')
+                product_uom_qty = line.get('product_uom_qty')
+                product_id = env['product.product'].sudo().search([('default_code', '=', product_code)], limit=1)
+
+                move_vals = {
+                    'name': product_id.name,
+                    'product_id': product_id.id,
+                    'product_uom': product_id.uom_id.id,  # Added product UOM
+                    'product_uom_qty': product_uom_qty,
+                    'quantity': product_uom_qty,  # Added to ensure validation
+                    'picking_id': goods_issue.id,
+                    'location_id': location_id,
+                    'location_dest_id': location_dest_id,
+                    'state': 'draft',
+                }
+                move_line_vals.append((0, 0, move_vals))
+
+            # Update goods issue with move lines
+            goods_issue.write({
+                'move_ids_without_package': move_line_vals
+            })
+
+            try:
+                # Validate the goods issue
+                goods_issue.button_validate()
+            except Exception as validate_error:
+                env.cr.rollback()
+                # If validation fails, delete the goods issue and return error
+                goods_issue.sudo().unlink()
+                raise Exception(f"Failed to validate Goods Issue: {str(validate_error)}")
+
+            return {
+                'code': 200,
+                'status': 'success',
+                'message': 'Goods Issue created and validated successfully',
+                'id': goods_issue.id,
+                'doc_num': goods_issue.name
+            }
+            
         except Exception as e:
             request.env.cr.rollback()
             _logger.error(f"Failed to create Goods Issue: {str(e)}", exc_info=True)
