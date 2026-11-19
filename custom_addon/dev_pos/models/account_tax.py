@@ -11,7 +11,10 @@ class AccountTax(models.Model):
     index_store = fields.Many2many('setting.config', string="Index Store", readonly=True)
     
     def write(self, vals):
-        if vals and 'is_integrated' not in vals:
+        # Perubahan data -> sync ulang ke SEMUA store (index_store dikosongkan).
+        # Penulisan dari integrator (is_integrated / index_store) tidak di-reset.
+        if vals and 'is_integrated' not in vals and 'index_store' not in vals:
             vals['is_integrated'] = False
+            vals['index_store'] = [(5, 0, 0)]
         
         return super(AccountTax, self).write(vals)

@@ -60,6 +60,51 @@ class DataIntegrator:
             self.set_log_mc.create_log_note_failed(f"Exception - {model}", f"{model} from {self.source_client.server_name} to {self.target_client.server_name}", e, None)
             self.set_log_ss.create_log_note_failed(f"Exception - {model}", model, e, None)
 
+    def _has_index_store(self, model):
+        """True kalau model di MC punya field index_store (di-cache per model)."""
+        cache = self.__dict__.setdefault('_index_store_cache', {})
+        if model not in cache:
+            try:
+                res = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                                   self.source_client.uid, self.source_client.password,
+                                                   model, 'fields_get', [['index_store']], {'attributes': ['type']})
+                cache[model] = 'index_store' in (res or {})
+            except Exception:
+                cache[model] = False
+        return cache[model]
+
+    def _sync_domain(self, model, date_from, date_to):
+        """Kondisi record yang dikirim ke store tujuan:
+           (is_integrated = False DAN write_date dalam rentang)  -> data baru/berubah
+           ATAU store tujuan belum ada di index_store             -> store yang belum ter-sync
+              (tanpa batas tanggal, supaya store baru menerima data lama)."""
+        base = ['&', '&', ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]
+        store_id = getattr(self, 'current_store_id', None)
+        if store_id and self._has_index_store(model):
+            return ['|'] + base + [['index_store', 'not in', [store_id]]]
+        return base
+
+    def mark_integrated_if_complete(self, model, ids):
+        """is_integrated = True HANYA kalau index_store sudah memuat SEMUA store ss.
+           index_store TIDAK dikosongkan, supaya store yang ditambahkan belakangan
+           tetap terdeteksi belum ter-sync."""
+        try:
+            ss_ids = set(getattr(self, 'ss_store_ids', None) or [])
+            if not ids or not ss_ids:
+                return
+            ids = ids if isinstance(ids, list) else [ids]
+            records = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                                   self.source_client.uid, self.source_client.password,
+                                                   model, 'search_read', [[['id', 'in', ids]]], {'fields': ['index_store']})
+            done_ids = [r['id'] for r in records if ss_ids.issubset(set(r.get('index_store') or []))]
+            if done_ids:
+                self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                             self.source_client.uid, self.source_client.password,
+                                             model, 'write', [done_ids, {'is_integrated': True}])
+        except Exception as e:
+            self.set_log_mc.create_log_note_failed(f"Exception - {model}", f"{model} from {self.source_client.server_name} to {self.target_client.server_name}", f"Error occurred when update is_integrated: {e}", None)
+            self.set_log_ss.create_log_note_failed(f"Exception - {model}", model, f"Error occurred when update is_integrated: {e}", None)
+
     def get_index_store_data(self, model, id, len_master_store):
         try:
             index_store_data = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
@@ -107,29 +152,25 @@ class DataIntegrator:
             if model == 'account.tax':
                 company_id = self.get_company_id(field_uniq)
                 data_list = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
-                                                    self.source_client.password, model, 'search_read', [[[field_uniq, '!=', False], ['is_integrated', '=', False], ['company_id', '=', company_id], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    self.source_client.password, model, 'search_read', [[[field_uniq, '!=', False], ['company_id', '=', company_id]] + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields})
             elif model == 'ir.sequence':
                 data_list = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
                                                     self.source_client.password, model, 'search_read', 
-                                                    [[  '&',  # Mulai grouping dengan AND untuk semua kondisi
-                                                        '|',  # OR untuk kondisi warehouse_name
-                                                        ['warehouse_name', '=', self.target_client.server_name], ['warehouse_name', '=', False],
-                                                        '&',  # AND untuk kondisi lainnya
-                                                        [field_uniq, '!=', False], ['is_integrated', '=', False], ['is_from_operation_types', '=', True], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    [['|', ['warehouse_name', '=', self.target_client.server_name], ['warehouse_name', '=', False],
+                                                      [field_uniq, '!=', False], ['is_from_operation_types', '=', True]]
+                                                     + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields})
             elif model == 'stock.picking.type':
                 data_list = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
                                                     self.source_client.password, model, 'search_read', 
-                                                    [[  '&',  # Mulai grouping dengan AND untuk semua kondisi
-                                                        '|',  # OR untuk kondisi warehouse_name
-                                                        ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
-                                                        '&',  # AND untuk kondisi lainnya
-                                                        [field_uniq, '!=', False], ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    [['|', ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
+                                                      [field_uniq, '!=', False]]
+                                                     + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields})
             elif model == 'product.template':
                 ids = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
-                                                    self.source_client.password, model, 'search', [[[field_uniq, '!=', False], ['is_integrated', '=', False], ['vit_is_discount', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]]) 
+                                                    self.source_client.password, model, 'search', [[[field_uniq, '!=', False], ['vit_is_discount', '=', False]] + self._sync_domain(model, date_from, date_to)]) 
                 data_list = []
                 batch_size=2000
                 for i in range(0, len(ids), batch_size):
@@ -149,7 +190,7 @@ class DataIntegrator:
                                                     {'fields': fields})  # , 'limit': 1 , 'limit': 100 debug False [field_uniq, '!=', False], 
             else:
                 data_list = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
-                                                    self.source_client.password, model, 'search_read', [[[field_uniq, '!=', False], ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    self.source_client.password, model, 'search_read', [[[field_uniq, '!=', False]] + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields})  # , 'limit': 1 , 'limit': 100 debug False
             return data_list
         except Exception as e:
@@ -169,6 +210,9 @@ class DataIntegrator:
 
                 # Ambil id berdasarkan 'vit_config_server_name'
                 index_field_store = next((item['id'] for item in ss_data if item['vit_config_server_name'] == self.target_client.server_name), None)
+                # Semua store (vit_config_server = ss) -> syarat record dianggap selesai ter-sync
+                self.ss_store_ids = [item['id'] for item in data_master_conf if item['vit_config_server'] == 'ss']
+                self.current_store_id = index_field_store
             # self.set_log_mc.create_log_note_failed(f"Exception - search setting.config", f"Check debug from {self.source_client.server_name} to {self.target_client.server_name}", f"{data_master_conf}, {ss_data}, {len_master_conf}, {last_index} {vit_config_last_store}, {index_field_store} {self.target_client.server_name}", None)
             return len_master_conf, vit_config_last_store, index_field_store
         except Exception as e:
@@ -194,6 +238,8 @@ class DataIntegrator:
         try:
             if model == 'product.pricelist.item':
                 filter = ['|', ['is_integrated', '=', False], ['is_updated', '=', True]]
+                if getattr(self, 'current_store_id', None) and self._has_index_store(model):
+                    filter = ['|'] + filter + [['index_store', 'not in', [self.current_store_id]]]
                 fields = ['product_tmpl_id', 'min_quantity', 'fixed_price', 'date_start', 'date_end', 'compute_price', 'percent_price', 'base', 'price_discount', 'price_surcharge', 'price_round', 'price_min_margin', 'price_max_margin', 'applied_on', 'categ_id', 'product_id'] # , 'is_integrated', 'is_updated'
             elif model == 'account.tax.repartition.line':
                 filter = []
@@ -333,10 +379,11 @@ class DataIntegrator:
     def transfer_data(self, model, fields, modul, date_from, date_to):
         try:  
             field_uniq = self.get_field_uniq_from_model(model)
+            # master conf dulu: store tujuan dipakai di filter get_data_list (index_store)
+            len_master, last_master_url, index_store_field = self.get_master_conf()
             data_list = self.get_data_list(model, fields, field_uniq, date_from, date_to)
             if data_list:
                 existing_datalist = {data[field_uniq] for data in data_list}
-                len_master, last_master_url, index_store_field = self.get_master_conf()
                 existing_data_target = self.get_existing_data(model, field_uniq, fields, existing_datalist) # 1 calling odoo
                 existing_data = {data[field_uniq] for data in existing_data_target}
                 type_fields, relation_fields = self.get_type_data_source(model, fields) # 2 calling odoo
@@ -454,12 +501,9 @@ class DataIntegrator:
                             if model == 'product.pricelist':
                                 self.update_indexstore_source('product.pricelist.item', id_line_for_update_isintegrated, index_store_field)
                             
-                            if self.target_client.server_name == last_master_url:
-                                index_store_data = self.get_index_store_data(model, id_mc_for_update_isintegrated, len_master)
-                                self.update_isintegrated_source(model, index_store_data)
-                                if model == 'product.pricelist':
-                                    index_store_data = self.get_index_store_data('product.pricelist.item', id_line_for_update_isintegrated, len_master)
-                                    self.update_isintegrated_source('product.pricelist.item', index_store_data)
+                            self.mark_integrated_if_complete(model, id_mc_for_update_isintegrated)
+                            if model == 'product.pricelist':
+                                self.mark_integrated_if_complete('product.pricelist.item', id_line_for_update_isintegrated)
                                 
                             self.set_log_mc.create_log_note_success(log_data_created)
                             self.set_log_ss.create_log_note_success(log_data_created)
@@ -498,9 +542,7 @@ class DataIntegrator:
             if ids_for_update_index_store:
                 self.update_indexstore_source(model, ids_for_update_index_store, index_store_field)
 
-                if self.target_client.server_name == last_master_url:
-                    index_store_data = self.get_index_store_data(model, ids_for_update_index_store, len_master)
-                    self.update_isintegrated_source(model, index_store_data)
+                self.mark_integrated_if_complete(model, ids_for_update_index_store)
 
             if data_for_update:
                 for data_update in data_for_update:
@@ -514,9 +556,7 @@ class DataIntegrator:
 
                 self.update_indexstore_source(model, id_mc_for_update_isintegrated, index_store_field)
                 
-                if self.target_client.server_name == last_master_url:
-                    index_store_data = self.get_index_store_data(model, id_mc_for_update_isintegrated, len_master)
-                    self.update_isintegrated_source(model, index_store_data)
+                self.mark_integrated_if_complete(model, id_mc_for_update_isintegrated)
 
             # if self.target_client.url == last_master_url + "jsonrpc":
                 # self.update_isintegrated_source(model, id_mc_for_update_isintegrated)
