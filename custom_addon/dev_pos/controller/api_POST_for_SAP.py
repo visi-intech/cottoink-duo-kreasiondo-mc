@@ -2388,11 +2388,12 @@ def _validate_pickings(pickings):
         raise UserError(f"Document not done after validation: {', '.join(not_done.mapped('name'))}")
 
 
-def _process_stock_documents(env, uid, payload, type_name, label, swap_header_location):
+def _process_stock_documents(env, uid, payload, type_name, label, aliases=()):
     """
-    type_name : nama picking type untuk cek duplikat ('Goods Receipts' / 'Goods Issue')
+    type_name : nama picking type default ('Goods Receipts' / 'Goods Issue')
     label     : teks untuk pesan ('Goods Receipt' / 'Goods Issue')
-    swap_header_location : True untuk GR (perilaku lama: lokasi header dibalik, move tetap)
+    aliases   : nama lain yang dianggap tipe yang sama, mis. 'Goods Receipt' = 'Goods Receipts'
+    company_name di payload dipakai untuk memilih picking type milik company tersebut.
     """
     cr = env.cr
     Picking = env['stock.picking'].sudo()
@@ -2410,13 +2411,16 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
     # ------------------------------------------------------------
     # BULK LOOKUP
     # ------------------------------------------------------------
-    trxids, type_names, loc_ids, product_codes = set(), set(), set(), set()
+    trxids, type_names, loc_ids, product_codes = set(), {type_name, *aliases}, set(), set()
+    company_names = set()
     for d in docs:
         if not isinstance(d, dict):
             continue
         if d.get('transaction_id'):
             trxids.add(str(d['transaction_id']))
         type_names.add(d.get('picking_type') or type_name)
+        if d.get('company_name'):
+            company_names.add(d['company_name'])
         for key in ('location_id', 'location_dest_id'):
             if isinstance(d.get(key), int):
                 loc_ids.add(d[key])
@@ -2424,14 +2428,32 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
             if isinstance(line, dict) and line.get('product_code'):
                 product_codes.add(line['product_code'])
 
+    company_by_name = {c.name: c for c in env['res.company'].sudo().search([('name', 'in', list(company_names))])}
+
+    # Picking type per (company, nama) -- termasuk alias & yang diarsipkan (untuk cek duplikat)
+    all_types = env['stock.picking.type'].sudo().with_context(active_test=False).search(
+        [('name', 'in', list(type_names))], order='id')
+    all_type_ids = all_types.ids
+    pt_by_company_name, pt_by_name = {}, {}
+    for pt in all_types.filtered('active'):
+        pt_by_company_name.setdefault((pt.company_id.id or False, pt.name), pt)
+        pt_by_name.setdefault(pt.name, pt)
+
+    def resolve_picking_type(requested, company):
+        names = [requested]
+        if requested in aliases or requested == type_name:
+            names += [n for n in (type_name, *aliases) if n != requested]
+        for n in names:
+            pt = (pt_by_company_name.get((company.id, n)) or pt_by_company_name.get((False, n)))                 if company else pt_by_name.get(n)
+            if pt:
+                return pt
+        return None
+
+    # Cek duplikat: transaction_id yang sama di picking type GR/GI mana pun (termasuk alias)
     existing_by_trxid = {}
     for chunk in _chunks(list(trxids), 5000):
-        for p in Picking.search([('vit_trxid', 'in', chunk), ('picking_type_id.name', '=', type_name)]):
+        for p in Picking.search([('vit_trxid', 'in', chunk), ('picking_type_id', 'in', all_type_ids)]):
             existing_by_trxid.setdefault(p.vit_trxid, p)
-
-    picking_types = {}
-    for pt in env['stock.picking.type'].sudo().search([('name', 'in', list(type_names))], order='id'):
-        picking_types.setdefault(pt.name, pt)
 
     valid_loc_ids = set(env['stock.location'].sudo().with_context(active_test=False)
                         .search([('id', 'in', list(loc_ids))]).ids)
@@ -2462,9 +2484,9 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
     def lock_and_recheck(entries):
         """Advisory lock per transaction_id + cek ulang duplikat (request paralel)."""
         for trxid, _h, _m in entries:
-            _advisory_lock(cr, f"stock.picking.trxid:{type_name}:{trxid}")
+            _advisory_lock(cr, f"stock.picking.trxid:{label}:{trxid}")
         dup = Picking.search([('vit_trxid', 'in', [t for t, _h, _m in entries]),
-                              ('picking_type_id.name', '=', type_name)])
+                              ('picking_type_id', 'in', all_type_ids)])
         if dup:
             raise UserError(f"{label} already exists: {', '.join(dup.mapped('vit_trxid'))}")
 
@@ -2524,7 +2546,7 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
                 else:
                     try:
                         with cr.savepoint():
-                            _advisory_lock(cr, f"stock.picking.trxid:{type_name}:{trxid}")
+                            _advisory_lock(cr, f"stock.picking.trxid:{label}:{trxid}")
                             _validate_pickings(existing)
                         to_validated(existing, trxid, 'validated_existing')
                     except Exception as e:
@@ -2532,7 +2554,15 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
                                        'message': f"Failed to validate existing {label}: {e}"})
                 continue
 
-            picking_type = picking_types.get(d.get('picking_type') or type_name)
+            company = None
+            if d.get('company_name'):
+                company = company_by_name.get(d['company_name'])
+                if not company:
+                    failed.append({'transaction_id': trxid,
+                                   'message': f"Company '{d['company_name']}' not found."})
+                    continue
+
+            picking_type = resolve_picking_type(d.get('picking_type') or type_name, company)
             if not picking_type:
                 failed.append({'transaction_id': trxid,
                                'message': f"Picking type '{d.get('picking_type') or type_name}' not found."})
@@ -2584,9 +2614,8 @@ def _process_stock_documents(env, uid, payload, type_name, label, swap_header_lo
 
             header = {
                 'picking_type_id': picking_type.id,
-                # GR: header dibalik seperti versi lama; move tetap sesuai payload
-                'location_id': location_dest_id if swap_header_location else location_id,
-                'location_dest_id': location_id if swap_header_location else location_dest_id,
+                'location_id': location_id,
+                'location_dest_id': location_dest_id,
                 'move_type': d.get('move_type') or 'direct',
                 'scheduled_date': d.get('scheduled_date'),
                 'date_done': d.get('date_done'),
@@ -2665,7 +2694,8 @@ class POSTGoodsReceipt(http.Controller):
             if error:
                 return error
             return _process_stock_documents(env, uid, request.get_json_data(),
-                                            'Goods Receipts', 'Goods Receipt', swap_header_location=True)
+                                            'Goods Receipts', 'Goods Receipt',
+                                            aliases=('Goods Receipt',))
         except Exception as e:
             request.env.cr.rollback()
             _logger.error(f"Failed to create Goods Receipt: {str(e)}", exc_info=True)
@@ -2680,7 +2710,8 @@ class POSTGoodsIssue(http.Controller):
             if error:
                 return error
             return _process_stock_documents(env, uid, request.get_json_data(),
-                                            'Goods Issue', 'Goods Issue', swap_header_location=False)
+                                            'Goods Issue', 'Goods Issue',
+                                            aliases=('Goods Issues',))
         except Exception as e:
             request.env.cr.rollback()
             _logger.error(f"Failed to create Goods Issue: {str(e)}", exc_info=True)
