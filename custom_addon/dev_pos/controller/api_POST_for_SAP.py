@@ -7,9 +7,22 @@ import json
 import logging
 import base64
 from odoo.exceptions import AccessError
+import werkzeug.exceptions
+from .api_utils import check_authorization
 from ..models.merchandise_category import MERCHANDISE_CATEGORY_FIELDS, MERCHANDISE_CATEGORY_LEGACY_KEYS
 
 _logger = logging.getLogger(__name__)
+
+
+def _check_token():
+    """Validasi header Authorization (token.generate) untuk API POST.
+    Return None kalau valid, atau dict response 401 kalau tidak."""
+    try:
+        check_authorization()
+        return None
+    except werkzeug.exceptions.Unauthorized as e:
+        return {'status': 'Failed', 'code': 401, 'message': e.description}
+
 
 
 # ==================== CUSTOMER GROUP API ====================
@@ -29,6 +42,11 @@ class POSTCustomerGroup(http.Controller):
     @http.route('/api/master_customer_group', type='json', auth='none', methods=['POST'], csrf=False)
     def post_customer_group(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # 🔐 Cek fitur aktif
             if not is_customer_group_pricelist_enabled():
                 return {
@@ -264,6 +282,11 @@ class POSTMasterTax(http.Controller):
     @http.route('/api/master_tax', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_tax(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # 🔐 Authentication
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
@@ -359,6 +382,11 @@ class POSTEmployee(http.Controller):
     @http.route('/api/hr_employee', type='json', auth='none', methods=['POST'], csrf=False)
     def post_employee(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -448,6 +476,11 @@ class POSTMasterBoM(http.Controller):
     @http.route('/api/master_bom', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_bom(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -625,6 +658,11 @@ class POSTMasterItem(http.Controller):
     @http.route('/api/master_item', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_item(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # 🔐 Autentikasi (TETAP seperti versi lama)
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
@@ -1015,6 +1053,11 @@ class POSTMasterPricelist(http.Controller):
         Pricelist dicari berdasarkan vit_code (per company).
         """
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # =========================================================
             # AUTHENTICATION (sama seperti endpoint lain)
             # =========================================================
@@ -1356,6 +1399,11 @@ class POSTMasterUoM(http.Controller):
     @http.route('/api/master_uom', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_uom(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # 🔐 Autentikasi
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
@@ -1474,6 +1522,11 @@ class POSTMasterContact(http.Controller):
     @http.route('/api/master_contact', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_contact(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Autentikasi
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
@@ -1735,6 +1788,11 @@ class POSTMasterWarehouse(http.Controller):
     @http.route('/api/master_warehouse', type='json', auth='none', methods=['POST'], csrf=False)
     def post_master_warehouse(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication (tetap cara lama)
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -2191,6 +2249,11 @@ class POSTItemCategory(http.Controller):
     @http.route('/api/item_category', type='json', auth='none', methods=['POST'], csrf=False)
     def post_item_group(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -2234,6 +2297,11 @@ class POSTItemPoSCategory(http.Controller):
     @http.route('/api/pos_category', type='json', auth='none', methods=['POST'], csrf=False)
     def post_pos_category(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -2275,6 +2343,11 @@ class POSTGoodsReceipt(http.Controller):
     @http.route('/api/goods_receipt', type='json', auth='none', methods=['POST'], csrf=False)
     def post_goods_receipt(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -2421,6 +2494,11 @@ class POSTGoodsIssue(http.Controller):
     @http.route('/api/goods_issue', type='json', auth='none', methods=['POST'], csrf=False)
     def post_goods_issue(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # Authentication
             config = request.env['setting.config'].sudo().search([('vit_config_server', '=', 'mc')], limit=1)
             if not config:
@@ -2567,6 +2645,11 @@ class POSTPurchaseOrderFromSAP(http.Controller):
     @http.route('/api/purchase_order', type='json', auth='none', methods=['POST'], csrf=False)
     def post_purchase_order(self, **kw):
         try:
+            # 🔐 Token check (header Authorization)
+            auth_error = _check_token()
+            if auth_error:
+                return auth_error
+
             # 🔐 Authentication
             config = request.env['setting.config'].sudo().search(
                 [('vit_config_server', '=', 'mc')], limit=1
