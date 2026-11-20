@@ -37,6 +37,21 @@ class DataTransaksiMCtoSS:
         self._load_store_ids()
         return self._current_store_cache
 
+    @staticmethod
+    def _stock_direction(location_id, location_dest_id, usage_map, incoming):
+        """Tentukan arah lokasi berdasarkan jenis lokasi di store, bukan urutan header MC
+        (header GR dari API lama MC terbalik, yang baru sudah benar).
+        incoming=True  (Goods Receipt): tujuan harus lokasi internal/transit.
+        incoming=False (Goods Issue)  : sumber harus lokasi internal/transit."""
+        internal = ('internal', 'transit')
+        src_internal = usage_map.get(location_id) in internal
+        dest_internal = usage_map.get(location_dest_id) in internal
+        if incoming and src_internal and not dest_internal:
+            return location_dest_id, location_id
+        if not incoming and dest_internal and not src_internal:
+            return location_dest_id, location_id
+        return location_id, location_dest_id
+
     def _not_synced_domain(self):
         """Domain 'store ini belum ada di index_store' (kosong kalau store tidak dikenal)."""
         sid = self._current_store_id()
@@ -2894,7 +2909,7 @@ class DataTransaksiMCtoSS:
                                               self.target_client.uid, self.target_client.password,
                                               'stock.location', 'search_read',
                                               [[['id_mc', 'in', location_ids]]],
-                                              {'fields': ['id', 'id_mc', 'complete_name']})
+                                              {'fields': ['id', 'id_mc', 'complete_name', 'usage']})
             location_source_dict = {location['id_mc']: location['id'] for location in location_source}
             print("Location Source Dict:", location_source_dict)
 
@@ -2903,9 +2918,10 @@ class DataTransaksiMCtoSS:
                                                                 self.target_client.uid, self.target_client.password,
                                                                 'stock.location', 'search_read',
                                                                 [[['id_mc', 'in', location_dest_ids]]],
-                                                                {'fields': ['id', 'id_mc', 'complete_name']})
+                                                                {'fields': ['id', 'id_mc', 'complete_name', 'usage']})
             location_dest_source_dict = {location_dest['id_mc']: location_dest['id'] for location_dest in location_dest_source}
             print("Location Dest Source Dict:", location_dest_source_dict)
+            location_usage_map = {loc['id']: loc.get('usage') for loc in (location_source or []) + (location_dest_source or [])}
 
             picking_type_source = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                     self.target_client.uid, self.target_client.password,
@@ -2987,6 +3003,10 @@ class DataTransaksiMCtoSS:
                     # print(f"Data tidak lengkap untuk transaksi dengan ID {record.get('id')}. Tidak membuat dokumen.")
                     return
 
+                # Goods Receipt = barang MASUK: tujuan harus lokasi internal
+                location_id, location_dest_id = self._stock_direction(
+                    location_id, location_dest_id, location_usage_map, incoming=True)
+
                 missing_products = []
                 goods_receipt_inventory_line_ids = []
                 should_skip_create = False
@@ -3005,8 +3025,8 @@ class DataTransaksiMCtoSS:
                         'product_uom_qty': line.get('product_uom_qty'),
                         'name': line.get('name'),
                         'quantity': line.get('quantity'),
-                        'location_dest_id': int(location_id),
-                        'location_id': int(location_dest_id)
+                        'location_id': int(location_id),
+                        'location_dest_id': int(location_dest_id)
                     }
                     goods_receipt_inventory_line_ids.append((0, 0, goods_receipt_inventory_line_data))
                     # print(goods_receipt_inventory_line_ids)
@@ -3017,6 +3037,7 @@ class DataTransaksiMCtoSS:
                     write_date = self.get_write_date(model_name, record['id'])
                     self.set_log_mc.create_log_note_failed(record, 'Goods Receipts', message, write_date)
                     self.set_log_ss.create_log_note_failed(record, 'Goods Receipts', message, write_date)
+                    return
 
                 goods_receipts_transfer_data = {
                     # 'name': record.get('name', False) + ' - ' + datetime.now(pytz.timezone('Asia/Jakarta')).strftime("%Y-%m-%d %H:%M:%S"),
@@ -3026,8 +3047,8 @@ class DataTransaksiMCtoSS:
                     'vit_trxid': record.get('name', False),
                     'is_integrated': True,
                     'origin': record.get('vit_trxid', False),
-                    'location_id': int(location_dest_id),
-                    'location_dest_id': int(location_id),
+                    'location_id': int(location_id),
+                    'location_dest_id': int(location_dest_id),
                     'picking_type_id': int(picking_type_id),
                     'move_ids_without_package': goods_receipt_inventory_line_ids,
                 }
@@ -3278,7 +3299,7 @@ class DataTransaksiMCtoSS:
                                               self.target_client.uid, self.target_client.password,
                                               'stock.location', 'search_read',
                                               [[['id_mc', 'in', location_ids]]],
-                                              {'fields': ['id', 'id_mc', 'complete_name']})
+                                              {'fields': ['id', 'id_mc', 'complete_name', 'usage']})
             location_source_dict = {location['id_mc']: location['id'] for location in location_source}
             print("Location Source Dict:", location_source_dict)
 
@@ -3287,9 +3308,10 @@ class DataTransaksiMCtoSS:
                                                                 self.target_client.uid, self.target_client.password,
                                                                 'stock.location', 'search_read',
                                                                 [[['id_mc', 'in', location_dest_ids]]],
-                                                                {'fields': ['id', 'id_mc', 'complete_name']})
+                                                                {'fields': ['id', 'id_mc', 'complete_name', 'usage']})
             location_dest_source_dict = {location_dest['id_mc']: location_dest['id'] for location_dest in location_dest_source}
             print("Location Dest Source Dict:", location_dest_source_dict)
+            location_usage_map = {loc['id']: loc.get('usage') for loc in (location_source or []) + (location_dest_source or [])}
 
             picking_type_source = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                     self.target_client.uid, self.target_client.password,
@@ -3371,6 +3393,10 @@ class DataTransaksiMCtoSS:
                 if location_id is None or location_dest_id is None or picking_type_id is None:
                     print(f"Data tidak lengkap untuk transaksi dengan ID {record.get('name')}. Tidak membuat dokumen.")
                     return
+
+                # Goods Issue = barang KELUAR: sumber harus lokasi internal
+                location_id, location_dest_id = self._stock_direction(
+                    location_id, location_dest_id, location_usage_map, incoming=False)
                 
                 missing_products = []
                 goods_issue_inventory_line_ids = []
