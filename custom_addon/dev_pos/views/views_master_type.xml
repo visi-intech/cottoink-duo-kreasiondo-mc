@@ -45,7 +45,8 @@
             name="Master Type"
             action="action_master_type"
             parent="setting_config_menu_root"
-            sequence="15"/>
+            sequence="15"
+            active="False"/>
 
     </data>
 </odoo>

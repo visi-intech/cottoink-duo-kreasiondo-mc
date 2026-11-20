@@ -11,6 +11,7 @@
     'depends': ['base', 'sale', 'stock', 'point_of_sale', 'account', 'mrp', 'loyalty', 'purchase', 'hr', 'l10n_id', 'l10n_id_efaktur', 'stock_no_negative'], #, 'l10n_id_efaktur_coretax'
     'data': [
         # 'security/hr_security.xml',
+        'security/security.xml',
         'security/ir.model.access.csv',
         'data/mrp_bom_schedule.xml',
         'views/views_pos_order.xml',

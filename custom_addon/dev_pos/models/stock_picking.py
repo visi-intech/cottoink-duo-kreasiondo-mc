@@ -10,7 +10,9 @@ class StockPicking(models.Model):
 
     is_integrated = fields.Boolean(string="Integrated", default=False, readonly=True, tracking=True)
     is_closed = fields.Boolean(string="Closed", default=False, readonly=True, tracking=True)
-    vit_trxid = fields.Char(string="Transaction ID", default=False, tracking=True, index=True)
+    # copy=False: Return / Duplicate tidak ikut membawa Transaction ID dokumen asli
+    # (kalau ikut, sync MC->SS menganggap dokumen sudah ada dan tidak membuat ulang).
+    vit_trxid = fields.Char(string="Transaction ID", default=False, tracking=True, index=True, copy=False)
     target_location = fields.Char(string="Target Location")
     stock_type = fields.Many2one('master.type', string="Stock Type")
 

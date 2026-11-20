@@ -48,5 +48,5 @@
         <field name="view_mode">tree,form</field>
     </record>
 
-    <menuitem id="menu_list_license" name="List License" action="action_list_license" parent="setting_config_menu_root" sequence="10"/>
+    <menuitem id="menu_list_license" name="List License" action="action_list_license" parent="setting_config_menu_root" sequence="10" active="False"/>
 </odoo>

@@ -48,7 +48,7 @@
     </record>
 
     <record id="master_config_action" model="ir.actions.act_window">
-      <field name="name">Master Configurasi</field>
+      <field name="name">Konfigurasi Server</field>
       <field name="res_model">setting.config</field>
       <field name="view_mode">tree,form</field>
       <field name="view_id" ref="view_master_config_tree"/>

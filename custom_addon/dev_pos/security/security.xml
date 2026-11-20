@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <data noupdate="0">
+    <!-- Hanya user di group ini yang melihat menu Configurasi Server -->
+    <record id="group_configurasi_server" model="res.groups">
+      <field name="name">Konfigurasi Server (Admin)</field>
+      <field name="category_id" ref="base.module_category_hidden"/>
+    </record>
+  </data>
+</odoo>
