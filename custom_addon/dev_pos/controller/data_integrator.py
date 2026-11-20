@@ -74,15 +74,15 @@ class DataIntegrator:
         return cache[model]
 
     def _sync_domain(self, model, date_from, date_to):
-        """Kondisi record yang dikirim ke store tujuan:
-           (is_integrated = False DAN write_date dalam rentang)  -> data baru/berubah
-           ATAU store tujuan belum ada di index_store             -> store yang belum ter-sync
-              (tanpa batas tanggal, supaya store baru menerima data lama)."""
-        base = ['&', '&', ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]
+        """Kondisi record yang dikirim ke store tujuan.
+           Model ber-index_store: store tujuan BELUM ada di index_store (tanpa batas
+           tanggal). Setiap perubahan data mengosongkan index_store, jadi data baru /
+           berubah otomatis ikut; store yang ditambahkan belakangan menerima data lama.
+           Model tanpa index_store: perilaku lama (is_integrated = False + rentang tanggal)."""
         store_id = getattr(self, 'current_store_id', None)
         if store_id and self._has_index_store(model):
-            return ['|'] + base + [['index_store', 'not in', [store_id]]]
-        return base
+            return [['index_store', 'not in', [store_id]]]
+        return [['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]
 
     def mark_integrated_if_complete(self, model, ids):
         """is_integrated = True HANYA kalau index_store sudah memuat SEMUA store ss.
@@ -297,7 +297,8 @@ class DataIntegrator:
             duration = end_time - start_time
 
             if update_operation_types:
-                self.update_isintegrated_source(model, [id_mc])
+                self.update_indexstore_source(model, [id_mc], self.current_store_id)
+                self.mark_integrated_if_complete(model, [id_mc])
                 write_date = record.get('write_date')
                 log_record_updated = self.set_log_mc.log_update_record_success(record, id_data_operation_types, updated_operation_types, start_time, end_time, duration, 'Update Operation Types', write_date, self.source_client.server_name, self.target_client.server_name)
                 self.set_log_mc.create_log_note_update_success(log_record_updated)
@@ -309,14 +310,14 @@ class DataIntegrator:
 
     def update_operation_types(self, model, fields, modul, date_from, date_to):
         try:
+            # master conf dulu: store tujuan dipakai di filter index_store
+            self.get_master_conf()
             # Update nama ke GRPO
             data_list_GRPO = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
-                                                    self.source_client.password, model, 'search_read', 
-                                                    [[  '&',  # Mulai grouping dengan AND untuk semua kondisi
-                                                        '|',  # OR untuk kondisi warehouse_name
-                                                        ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
-                                                        '&',  # AND untuk kondisi lainnya 
-                                                        ['name', '=', 'GRPO'], ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    self.source_client.password, model, 'search_read',
+                                                    [['|', ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
+                                                      ['name', '=', 'GRPO']]
+                                                     + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields})
             if data_list_GRPO:
                 id_data_list_GRPO = data_list_GRPO[0]['id']
@@ -335,7 +336,8 @@ class DataIntegrator:
                     duration = end_time - start_time
 
                     if update_operation_types:
-                        self.update_isintegrated_source(model, [id_data_list_GRPO])
+                        self.update_indexstore_source(model, [id_data_list_GRPO], self.current_store_id)
+                        self.mark_integrated_if_complete(model, [id_data_list_GRPO])
                         write_date = data_list_GRPO[0]['write_date']
                         log_record_updated = self.set_log_mc.log_update_record_success(data_list_GRPO[0], id_data_operation_types, updated_operation_types, start_time, end_time, duration, modul, write_date, self.source_client.server_name, self.target_client.server_name)
                         self.set_log_mc.create_log_note_update_success(log_record_updated)
@@ -343,11 +345,9 @@ class DataIntegrator:
             
             data_list = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db, self.source_client.uid,
                                                     self.source_client.password, model, 'search_read', 
-                                                    [[  '&',  # Mulai grouping dengan AND untuk semua kondisi
-                                                        '|',  # OR untuk kondisi warehouse_name
-                                                        ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
-                                                        '&',  # AND untuk kondisi lainnya 
-                                                        ['name', '!=', 'False'], ['is_integrated', '=', False], ['write_date', '>=', date_from], ['write_date', '<=', date_to]]],
+                                                    [['|', ['warehouse_id.name', '=', self.target_client.server_name], ['warehouse_id', '=', False],
+                                                      ['name', '!=', 'False']]
+                                                     + self._sync_domain(model, date_from, date_to)],
                                                     {'fields': fields}) # , 'limit': 1
             if data_list:
                 existing_datalist = {data['name'] for data in data_list}

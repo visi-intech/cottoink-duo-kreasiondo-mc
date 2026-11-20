@@ -12,6 +12,72 @@ class DataTransaksiMCtoSS:
         self.set_log_mc = SetLogMC(self.source_client)
         self.set_log_ss = SetLogSS(self.target_client)
 
+    # ============================================================
+    # INDEX STORE HELPERS
+    #   index_store = daftar store (setting.config) yang SUDAH menerima record.
+    #   - record dikirim ke store ini kalau flag-nya belum selesai ATAU store ini
+    #     belum ada di index_store (store yang ditambahkan belakangan tetap dapat).
+    #   - record dianggap selesai kalau index_store memuat SEMUA store ss.
+    #   - index_store TIDAK dikosongkan saat selesai.
+    # ============================================================
+    def _load_store_ids(self):
+        if getattr(self, '_ss_ids_cache', None) is None:
+            configs = self.source_client.call_odoo(
+                'object', 'execute_kw', self.source_client.db,
+                self.source_client.uid, self.source_client.password,
+                'setting.config', 'search_read',
+                [[['vit_config_server', '=', 'ss']]],
+                {'fields': ['id', 'vit_config_server_name']})
+            self._current_store_cache = next(
+                (c['id'] for c in configs if c['vit_config_server_name'] == self.target_client.server_name), None)
+            self._ss_ids_cache = [c['id'] for c in configs]
+        return self._ss_ids_cache
+
+    def _current_store_id(self):
+        self._load_store_ids()
+        return self._current_store_cache
+
+    def _not_synced_domain(self):
+        """Domain 'store ini belum ada di index_store' (kosong kalau store tidak dikenal)."""
+        sid = self._current_store_id()
+        return [['index_store', 'not in', [sid]]] if sid else []
+
+    def _pending_domain(self, flag='is_integrated', flag_value=False):
+        """Store ini belum ada di index_store (perubahan data mengosongkan index_store,
+        jadi data baru/berubah otomatis ikut). Kalau store tidak dikenal: filter flag lama."""
+        sid = self._current_store_id()
+        if not sid:
+            return [[flag, '=', flag_value]]
+        return [['index_store', 'not in', [sid]]]
+
+    def _mark_store_synced(self, model, rec_id, extra_vals=None, done_vals=None, keep_vals=None):
+        """Tambahkan store ini ke index_store record. Kalau semua store ss sudah
+        tercakup -> tulis done_vals, kalau belum -> keep_vals. Return True kalau selesai."""
+        sid = self._current_store_id()
+        if not sid:
+            return False
+        try:
+            current = self.source_client.call_odoo(
+                'object', 'execute_kw', self.source_client.db,
+                self.source_client.uid, self.source_client.password,
+                model, 'search_read', [[['id', '=', rec_id]]],
+                {'fields': ['index_store'], 'context': {'active_test': False}})
+            index_ids = set(current[0].get('index_store') or []) if current else set()
+            index_ids.add(sid)
+            complete = set(self._load_store_ids()).issubset(index_ids)
+
+            vals = dict(extra_vals or {})
+            vals['index_store'] = [(4, sid)]
+            vals.update((done_vals if complete else keep_vals) or {})
+            self.source_client.call_odoo(
+                'object', 'execute_kw', self.source_client.db,
+                self.source_client.uid, self.source_client.password,
+                model, 'write', [[rec_id], vals])
+            return complete
+        except Exception as e:
+            print(f"⚠️ Gagal update index_store {model} ID {rec_id}: {e}")
+            return False
+
     def transfer_customer_group(self, model_name, fields, description, date_from, date_to):
         # Ambil data dari sumber
         transaksi_customer_group = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
@@ -137,7 +203,7 @@ class DataTransaksiMCtoSS:
             transaksi_bom_master = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                 self.source_client.uid, self.source_client.password,
                 model_name, 'search_read',
-                [[['is_integrated', '=', False]]],
+                [self._pending_domain()],
                 {'fields': fields})
 
             if not transaksi_bom_master:
@@ -308,54 +374,10 @@ class DataTransaksiMCtoSS:
                     print(f"💥 Gagal create/update BoM ID {record['id']}: {e}")
                     return
 
-                try:
-                    index_store_ids = record.get('index_store', [])
-                    
-                    # Ambil setting config yang aktif untuk target integrasi
-                    setting_config_ids = self.source_client.call_odoo(
-                        'object', 'execute_kw', self.source_client.db,
-                        self.source_client.uid, self.source_client.password,
-                        'setting.config', 'search_read',
-                        [[['vit_config_server', '=', 'ss'], ['vit_linked_server', '=', True]]],
-                        {'fields': ['id']}
-                    )
-                    setting_config_ids = [config['id'] for config in setting_config_ids]
-
-                    # Update index_store dengan setting config IDs yang aktif
-                    self.source_client.call_odoo(
-                        'object', 'execute_kw', self.source_client.db,
-                        self.source_client.uid, self.source_client.password,
-                        'mrp.bom', 'write',
-                        [[record['id']], {
-                            'index_store': [(6, 0, setting_config_ids)]
-                        }]
-                    )
-                    print(f"📌 Field index_store diperbarui untuk BoM ID {record['id']}.")
-
-                    # Periksa apakah semua setting config sudah tercakup di index_store
-                    if len(index_store_ids) + 1 >= len(setting_config_ids):
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'mrp.bom', 'write',
-                            [[record['id']], {
-                                'is_integrated': True,
-                                'index_store': [(5, 0, 0)]  # clear
-                            }]
-                        )
-                        print(f"✅ BoM ID {record['id']} telah diintegrasi ke semua target.")
-                    else:
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'mrp.bom', 'write',
-                            [[record['id']], {
-                                'is_integrated': False
-                            }]
-                        )
-                        print(f"⌛ BoM ID {record['id']} belum terintegrasi ke semua target.")
-                except Exception as e:
-                    print(f"⚠️ Gagal update index_store/is_integrated untuk BoM {record['id']}: {e}")
+                # Tandai BoM sudah ada di store ini
+                self._mark_store_synced('mrp.bom', record['id'],
+                                        done_vals={'is_integrated': True},
+                                        keep_vals={'is_integrated': False})
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [executor.submit(process_bom, record) for record in transaksi_bom_master]
@@ -500,7 +522,7 @@ class DataTransaksiMCtoSS:
             loyalty_points = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                         self.source_client.uid, self.source_client.password,
                                                         'loyalty.card', 'search_read',
-                                                        [[['program_id', '=', int(programs)], ['is_updated', '=', True]]],
+                                                        [[['program_id', '=', int(programs)], ['is_updated', '=', True]] + self._not_synced_domain()],
                                                         {'fields': ['code', 'points_display', 'expiration_date', 'program_id', 'currency_id', 'partner_id', 'source_pos_order_id', 'points']})
 
             # Pre-fetch necessary data to reduce API calls
@@ -644,7 +666,8 @@ class DataTransaksiMCtoSS:
 
         try:
             discount_loyalty = search_read(self.source_client, model_name,
-                                           [['active', '=', True], ['is_integrated', '=', False]], fields)
+                                           [['active', '=', True]] + self._pending_domain(),
+                                           list(fields) + ['is_updated'])
             if not discount_loyalty:
                 print("Tidak ada discount/loyalty yang ditemukan untuk ditransfer.")
                 return
@@ -659,6 +682,19 @@ class DataTransaksiMCtoSS:
                                                     [['vit_trxid', 'in', list(lookup_keys)], ['active', '=', True]],
                                                     ['id', 'vit_trxid'])
             existing_discount_dict = {record['vit_trxid']: record['id'] for record in existing_discount_loyalty}
+
+            # Program yang SUDAH ada di store ini (dan tidak sedang menunggu update)
+            # cukup ditandai di index_store supaya tidak terus terpilih.
+            current_store_id = self._current_store_id()
+            if current_store_id:
+                for record in discount_loyalty:
+                    already_exists = record.get('name') in existing_discount_dict or (
+                        record.get('vit_trxid') and record['vit_trxid'] in existing_discount_dict)
+                    if (already_exists and not record.get('is_updated')
+                            and current_store_id not in (record.get('index_store') or [])):
+                        self._mark_store_synced('loyalty.program', record['id'],
+                                                done_vals={'is_integrated': True, 'is_updated': False},
+                                                keep_vals={'is_updated': False})
 
             discount_loyalty = [
                 record for record in discount_loyalty
@@ -1062,19 +1098,12 @@ class DataTransaksiMCtoSS:
                             except Exception as e:
                                 print(f"✗ Failed to update vit_trxid for rules {rule_ids_to_update}: {e}")
 
-                        # Program: gabungkan update vit_trxid/index_store + status integrasi jadi 1 write
-                        index_store_ids = record.get('index_store') or []
-                        program_vals = {'vit_trxid': record['name']}
-                        if len(index_store_ids) == len(setting_config_ids):
-                            program_vals.update({'is_integrated': True, 'is_updated': False, 'index_store': [(5, 0, 0)]})
-                        else:
-                            program_vals.update({'is_integrated': False, 'index_store': [(6, 0, setting_config_ids)]})
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.program', 'write',
-                            [[record['id']], program_vals]
-                        )
+                        # Program: tandai store ini + status integrasi (1 write)
+                        self._mark_store_synced('loyalty.program', record['id'],
+                                                extra_vals={'vit_trxid': record['name']},
+                                                done_vals={'is_integrated': True, 'is_updated': False},
+                                                keep_vals={'is_integrated': False,
+                                                           'is_updated': bool(record.get('is_updated'))})
                         print(f"✓ Updated source program ID {record['id']}")
                     except Exception as e:
                         print(f"✗ Failed to update source program data: {e}")
@@ -1106,7 +1135,7 @@ class DataTransaksiMCtoSS:
             discount_loyalty = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                             self.source_client.uid, self.source_client.password,
                                                             model_name, 'search_read',
-                                                            [[['is_integrated', '=', False], ['is_updated', '=', True], ['active', 'in', [True, False]]]],
+                                                            [[['is_updated', '=', True], ['active', 'in', [True, False]]] + self._not_synced_domain()],
                                                             {'fields': fields})
             if not discount_loyalty:
                 print("Tidak ada discount/loyalty yang ditemukan untuk ditransfer.")
@@ -1377,32 +1406,10 @@ class DataTransaksiMCtoSS:
                     if not source_active_status:
                         print(f"✓ Program {record.get('name')} archived in target (following source)")
                         
-                        # Update status di source
-                        index_store_ids = record.get('index_store', [])
-                        setting_config_ids = self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'setting.config', 'search_read',
-                            [[['vit_config_server', '=', 'ss'], ['vit_linked_server', '=', True]]],
-                            {'fields': ['id']}
-                        )
-                        setting_config_ids = [config['id'] for config in setting_config_ids]
-                        
-                        # Check integration status
-                        if len(index_store_ids) == len(setting_config_ids):
-                            self.source_client.call_odoo(
-                                'object', 'execute_kw', self.source_client.db,
-                                self.source_client.uid, self.source_client.password,
-                                'loyalty.program', 'write',
-                                [[record['id']], {'is_integrated': True, 'is_updated': False, 'index_store': [(5, 0, 0)]}]
-                            )
-                        else:
-                            self.source_client.call_odoo(
-                                'object', 'execute_kw', self.source_client.db,
-                                self.source_client.uid, self.source_client.password,
-                                'loyalty.program', 'write',
-                                [[record['id']], {'is_updated': False}]
-                            )
+                        # Update status di source: tandai store ini
+                        self._mark_store_synced('loyalty.program', record['id'],
+                                                done_vals={'is_integrated': True, 'is_updated': False},
+                                                keep_vals={'is_updated': True})
                         
                         # Log success untuk archive
                         start_time = time.time()
@@ -1907,7 +1914,7 @@ class DataTransaksiMCtoSS:
                         'loyalty.program', 'write',
                         [[record['id']], {
                             'vit_trxid': record['name'],
-                            'index_store': [(6, 0, setting_config_ids)],
+                            'is_updated': True,
                             'reward_ids': reward_updates,
                             'rule_ids': [(1, rule['id'], {'vit_trxid': record['name']}) for rule in current_rule_lines],
                         }]
@@ -1915,22 +1922,10 @@ class DataTransaksiMCtoSS:
                     print(f"✓ Updated vit_reward_trxid in source for program ID {record['id']}")
                     # === AKHIR UPDATE SOURCE ===
 
-                    # Check integration status
-                    # Check integration status
-                    if len(index_store_ids) == len(setting_config_ids):
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.program', 'write',
-                            [[record['id']], {'is_integrated': True, 'is_updated': False, 'index_store': [(5, 0, 0)]}]
-                        )
-                    else:
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.program', 'write',
-                            [[record['id']], {'is_integrated': False}]
-                        )
+                    # Tandai store ini; selesai kalau semua store ss sudah menerima update
+                    self._mark_store_synced('loyalty.program', record['id'],
+                                            done_vals={'is_integrated': True, 'is_updated': False},
+                                            keep_vals={'is_updated': True})
 
                     end_time = time.time()
                     duration = end_time - start_time
@@ -1966,7 +1961,7 @@ class DataTransaksiMCtoSS:
         id_program = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                     self.source_client.uid, self.source_client.password,
                                                     model_name, 'search_read',
-                                                    [[['active', '=', True], ['is_integrated', '=', False], ['program_type', 'in', ['coupons', 'loyalty']]]],
+                                                    [[['active', '=', True], ['program_type', 'in', ['coupons', 'loyalty']]]],
                                                     {'fields': fields})
         
         if not id_program:
@@ -1980,7 +1975,7 @@ class DataTransaksiMCtoSS:
             loyalty_points = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                         self.source_client.uid, self.source_client.password,
                                                         'loyalty.card', 'search_read',
-                                                        [[['program_id', '=', programs]]],
+                                                        [[['program_id', '=', programs]] + self._pending_domain()],
                                                         {'fields': ['code', 'points_display', 'expiration_date', 'program_id', 'currency_id', 'partner_id', 'source_pos_order_id', 'points']})
             # if not loyalty_points:
             #     print("Tidak ada discount/loyalty yang ditemukan untuk ditransfer.")
@@ -2058,6 +2053,13 @@ class DataTransaksiMCtoSS:
                     {'fields': ['id']}
                 )
 
+                if existing_loyalty_points:
+                    # Sudah ada di store ini -> cukup tandai di index_store
+                    self._mark_store_synced('loyalty.card', record['id'],
+                                            done_vals={'is_integrated': True, 'is_updated': False},
+                                            keep_vals={'is_updated': False})
+                    return
+
                 if not existing_loyalty_points:
                     code = record.get('code')
                     expiration_date = record.get('expiration_date')
@@ -2088,38 +2090,9 @@ class DataTransaksiMCtoSS:
                                                                         [data_loyalty])
                         print(f"Loyalty telah dibuat dengan ID: {new_loyalty_data}")
 
-                        index_store_ids = record.get('index_store', [])
-                        # Set the index_store field with setting.config IDs
-                        setting_config_ids = self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'setting.config', 'search_read',
-                            [[['vit_config_server', '=', 'ss'], ['vit_linked_server', '=', True]]],
-                            {'fields': ['id']}
-                        )
-                        setting_config_ids = [config['id'] for config in setting_config_ids]
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'vit_trxid': record['name'],
-                                            'index_store': [(6, 0, setting_config_ids)]}]
-                        )
-                        print(f"Field is_integrated set to True for loyalty card ID {record['id']}.")
-
-                        if len(index_store_ids) == len(setting_config_ids):
-                            self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'is_integrated': True, 'is_updated': False, 'index_store': [(5, 0, 0)]}])
-
-                        else:
-                            self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'is_integrated': False}])
+                        self._mark_store_synced('loyalty.card', record['id'],
+                                                done_vals={'is_integrated': True, 'is_updated': False},
+                                                keep_vals={'is_integrated': False, 'is_updated': False})
                     except Exception as e:
                         print(f"Terjadi kesalahan saat membuat loyalty baru: {e}")
 
@@ -2143,7 +2116,7 @@ class DataTransaksiMCtoSS:
             loyalty_points = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                         self.source_client.uid, self.source_client.password,
                                                         'loyalty.card', 'search_read',
-                                                        [[['program_id', '=', int(programs)], ['is_updated', '=', True]]],
+                                                        [[['program_id', '=', int(programs)], ['is_updated', '=', True]] + self._not_synced_domain()],
                                                         {'fields': ['code', 'points_display', 'expiration_date', 'program_id', 'currency_id', 'partner_id', 'source_pos_order_id', 'points']})
 
             # Pre-fetch necessary data to reduce API calls
@@ -2250,38 +2223,9 @@ class DataTransaksiMCtoSS:
                                                     [[loyalty_id], data_loyalty_mc])
                         print(f"Loyalty dengan ID {loyalty_id} telah diperbarui di target_client.")
 
-                        index_store_ids = record.get('index_store', [])
-                        # Set the index_store field with setting.config IDs
-                        setting_config_ids = self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'setting.config', 'search_read',
-                            [[['vit_config_server', '=', 'ss'], ['vit_linked_server', '=', True]]],
-                            {'fields': ['id']}
-                        )
-                        setting_config_ids = [config['id'] for config in setting_config_ids]
-                        self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'vit_trxid': record['name'],
-                                            'index_store': [(6, 0, setting_config_ids)]}]
-                        )
-                        print(f"Field is_integrated set to True for loyalty program ID {record['id']}.")
-
-                        if len(index_store_ids) == len(setting_config_ids):
-                            self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'is_updated': True, 'index_store': [(5, 0, 0)]}])
-
-                        else:
-                            self.source_client.call_odoo(
-                            'object', 'execute_kw', self.source_client.db,
-                            self.source_client.uid, self.source_client.password,
-                            'loyalty.card', 'write',
-                            [[record['id']], {'is_updated': False}])
+                        self._mark_store_synced('loyalty.card', record['id'],
+                                                done_vals={'is_integrated': True, 'is_updated': False},
+                                                keep_vals={'is_updated': True})
                     except Exception as e:
                         print(f"Terjadi kesalahan saat memperbarui loyalty: {e}")
 
