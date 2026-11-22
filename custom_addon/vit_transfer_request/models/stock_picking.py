@@ -185,7 +185,30 @@ class StockPicking(models.Model):
             return self.browse()
 
         picking_type = self._get_ts_in_picking_type()
-        return self.env['stock.picking'].create(self._prepare_ts_in_values(picking_type, move_vals))
+        ts_in = self.env['stock.picking'].create(self._prepare_ts_in_values(picking_type, move_vals))
+        ts_in._set_ts_in_ready()
+        return ts_in
+
+    def _set_ts_in_ready(self):
+        """TS In langsung Ready (assigned), bukan Draft: confirm lalu reserve stok di lokasi
+        asal (transit) yang barusan diisi oleh TS Out. Kalau gagal / stok belum cukup,
+        TS In tetap terbentuk (status mengikuti Odoo) dan alasannya dicatat di chatter."""
+        for picking in self:
+            try:
+                with self.env.cr.savepoint():
+                    picking.action_confirm()
+                    picking.action_assign()
+            except Exception as exc:  # noqa: BLE001 - dicatat di log + chatter, bukan ditelan
+                _logger.exception("Gagal set Ready TS In %s", picking.name)
+                picking.message_post(body=_(
+                    "TS In gagal di-set Ready otomatis: %s. Klik Confirm / Check Availability manual.",
+                    str(exc)))
+                continue
+            if picking.state != 'assigned':
+                picking.message_post(body=_(
+                    "TS In belum bisa langsung Ready (status: %s). Cek ketersediaan stok di %s.",
+                    dict(picking._fields['state'].selection).get(picking.state, picking.state),
+                    picking.location_id.display_name))
 
     def _action_done(self):
         """Hook di picking (bukan button_validate) supaya TS In tetap terbentuk lewat
