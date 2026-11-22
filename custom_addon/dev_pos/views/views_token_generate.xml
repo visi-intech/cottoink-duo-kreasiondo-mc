@@ -44,5 +44,5 @@
         <field name="view_mode">tree,form</field>
     </record>
 
-    <menuitem id="menu_token_generate" name="Token Generate" action="action_token_generate" parent="setting_config_menu_root" sequence="10"/>
+    <menuitem id="menu_token_generate" name="Token Generate" action="action_token_generate" parent="setting_config_menu_root" sequence="10" groups="dev_pos.group_configurasi_server"/>
 </odoo>
