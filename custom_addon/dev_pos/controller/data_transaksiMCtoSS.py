@@ -4253,7 +4253,9 @@ class DataTransaksiMCtoSS:
             loss_account_source_dict = map_accounts(loss_account_ids, 'account.account')
 
             # Pasangkan journal MC dengan journal store (termasuk yang diarsipkan):
-            #   1) cocok NAMA lebih diutamakan;
+            #   0) id_mc di store = id journal MC -> pasti journal yang sama (walau nama
+            #      sudah diganti di MC);
+            #   1) cocok NAMA;
             #   2) kalau tidak ada, cocok KODE -- hanya kalau journal store itu belum
             #      dipakai journal MC lain (cocok nama). Contoh: QRIS di store berkode BNK3,
             #      sedangkan BNK3 di MC = Other Bank -> QRIS tetap dipasangkan ke QRIS MC,
@@ -4262,15 +4264,24 @@ class DataTransaksiMCtoSS:
                 'object', 'execute_kw', self.target_client.db,
                 self.target_client.uid, self.target_client.password,
                 'account.journal', 'search_read', [[]],
-                {'fields': ['id', 'name', 'code'], 'context': {'active_test': False}})
-            target_by_name, target_by_code = {}, {}
+                {'fields': ['id', 'name', 'code', 'id_mc'], 'context': {'active_test': False}})
+            target_by_name, target_by_code, target_by_idmc = {}, {}, {}
             for tj in target_journals:
+                if tj.get('id_mc'):
+                    target_by_idmc.setdefault(str(tj['id_mc']), tj['id'])
                 target_by_name.setdefault(tj.get('name'), tj['id'])
                 target_by_code.setdefault(tj.get('code'), tj['id'])
 
             existing_journal_dict = {}
             used_target_ids = set()
             for record in journal_account:
+                target_id = target_by_idmc.get(str(record['id']))
+                if target_id and target_id not in used_target_ids:
+                    existing_journal_dict[record['id']] = target_id
+                    used_target_ids.add(target_id)
+            for record in journal_account:
+                if record['id'] in existing_journal_dict:
+                    continue
                 target_id = target_by_name.get(record.get('name'))
                 if target_id and target_id not in used_target_ids:
                     existing_journal_dict[record['id']] = target_id
