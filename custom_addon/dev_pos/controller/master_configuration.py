@@ -307,6 +307,7 @@ class SettingConfig(models.Model):
             integrator_transaksiMCtoSS.pos_config_from_mc('pos.config', ['id', 'name', 'module_pos_hr', 'is_store', 'is_posbox', 'other_devices'], 'Transaksi PoS Config', datefrom, dateto)
             integrator_transaksiMCtoSS.payment_method_from_mc('pos.payment.method', ['id', 'name', 'is_online_payment', 'is_store', 'split_transactions', 'journal_id', 'config_ids'], 'Transaksi PoS Payment Method', datefrom, dateto)
             # Betulkan id_mc payment method yang sudah terlanjur ada di store (setiap store)
+            integrator_transaksiMCtoSS.reconcile_id_mc('account.journal', match_field='code', store_field='is_store')
             integrator_transaksiMCtoSS.reconcile_id_mc('pos.payment.method', store_field='is_store')
 
     def create_master_pricelist(self, mc, ss, datefrom, dateto):

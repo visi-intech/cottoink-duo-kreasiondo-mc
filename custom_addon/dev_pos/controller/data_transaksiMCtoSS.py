@@ -4203,10 +4203,9 @@ class DataTransaksiMCtoSS:
                 self.source_client.uid,
                 self.source_client.password,
                 model_name, 'search_read',
-                [[  '&',  # Mulai grouping dengan AND untuk semua kondisi
-                        '|',  # OR untuk kondisi tertentu
-                            ['is_store.vit_config_server_name', '=', target_client_server_name], ['is_store', '=', False],
-                        ['is_integrated', '=', False]]],
+                # Journal milik store ini atau tanpa store. Tidak lagi dibatasi is_integrated:
+                # setelah terkirim ke store pertama, store lain tetap harus menerima.
+                [['|', ['is_store.vit_config_server_name', '=', target_client_server_name], ['is_store', '=', False]]],
                 {'fields': fields} # 
             )
 
@@ -4253,19 +4252,36 @@ class DataTransaksiMCtoSS:
             ]
             loss_account_source_dict = map_accounts(loss_account_ids, 'account.account')
 
+            # Pasangkan journal MC dengan journal store (termasuk yang diarsipkan):
+            #   1) cocok NAMA lebih diutamakan;
+            #   2) kalau tidak ada, cocok KODE -- hanya kalau journal store itu belum
+            #      dipakai journal MC lain (cocok nama). Contoh: QRIS di store berkode BNK3,
+            #      sedangkan BNK3 di MC = Other Bank -> QRIS tetap dipasangkan ke QRIS MC,
+            #      Other Bank dibuat baru setelah kode QRIS di store disamakan dengan MC.
+            target_journals = self.target_client.call_odoo(
+                'object', 'execute_kw', self.target_client.db,
+                self.target_client.uid, self.target_client.password,
+                'account.journal', 'search_read', [[]],
+                {'fields': ['id', 'name', 'code'], 'context': {'active_test': False}})
+            target_by_name, target_by_code = {}, {}
+            for tj in target_journals:
+                target_by_name.setdefault(tj.get('name'), tj['id'])
+                target_by_code.setdefault(tj.get('code'), tj['id'])
+
             existing_journal_dict = {}
+            used_target_ids = set()
             for record in journal_account:
-                existing_journal = self.target_client.call_odoo(
-                    'object', 'execute_kw', 
-                    self.target_client.db,
-                    self.target_client.uid, 
-                    self.target_client.password,
-                    'account.journal', 'search_read',
-                    [[['name', '=', record.get('name')]]],
-                    {'fields': ['id'], 'limit': 1}
-                )
-                if existing_journal:
-                    existing_journal_dict[record['id']] = existing_journal[0]['id']
+                target_id = target_by_name.get(record.get('name'))
+                if target_id and target_id not in used_target_ids:
+                    existing_journal_dict[record['id']] = target_id
+                    used_target_ids.add(target_id)
+            for record in journal_account:
+                if record['id'] in existing_journal_dict:
+                    continue
+                target_id = target_by_code.get(record.get('code'))
+                if target_id and target_id not in used_target_ids:
+                    existing_journal_dict[record['id']] = target_id
+                    used_target_ids.add(target_id)
 
             # Process each journal account
             def process_journal_account(record):
@@ -4290,19 +4306,25 @@ class DataTransaksiMCtoSS:
                     if record['id'] in existing_journal_dict:
                         # Update id_mc on target_client if payment method exists
                         try:
+                            update_vals = {
+                                'id_mc': record.get('id', False),
+                                'name': record.get('name', False),
+                                'type': record.get('type', False),
+                                'refund_sequence': record.get('refund_sequence', False),
+                                'code': record.get('code'),
+                            }
+                            # Akun hanya ditimpa kalau akun pasangannya ada di store;
+                            # kalau tidak, akun journal di store dibiarkan (jangan dikosongkan).
+                            for field_name, account_id in (('default_account_id', default_account_id),
+                                                           ('suspense_account_id', suspense_account_id),
+                                                           ('profit_account_id', profit_account_id),
+                                                           ('loss_account_id', loss_account_id)):
+                                if account_id:
+                                    update_vals[field_name] = int(account_id)
                             self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                         self.target_client.uid, self.target_client.password,
                                                         'account.journal', 'write',
-                                                        [[existing_journal_dict[record['id']]],
-                                                        {'id_mc': record.get('id'), 'name': record.get('name', False),
-                                                            'type': record.get('type', False),
-                                                            'refund_sequence': record.get('refund_sequence', False),
-                                                            'code': record.get('code'),
-                                                            'id_mc': record.get('id', False),
-                                                            'default_account_id': int(default_account_id) if default_account_id else None,
-                                                            'suspense_account_id': int(suspense_account_id) if suspense_account_id else None,
-                                                            'profit_account_id': int(profit_account_id) if profit_account_id else None,
-                                                            'loss_account_id': int(loss_account_id) if loss_account_id else None,}])
+                                                        [[existing_journal_dict[record['id']]], update_vals])
                             
                             self.source_client.call_odoo(
                                 'object', 'execute_kw', self.source_client.db,
@@ -4360,10 +4382,15 @@ class DataTransaksiMCtoSS:
                             self.target_client.password,
                             'account.journal', 'search_read',
                             [[['code', '=', record.get('code')]]],
-                            {'fields': ['id']}
+                            {'fields': ['id'], 'context': {'active_test': False}}
                         )
                         if existing_code:
-                            print(f"Journal code {record.get('code')} already exists, skipping creation.")
+                            message = (f"Kode journal {record.get('code')} sudah dipakai journal lain di store; "
+                                       f"journal '{record.get('name')}' tidak dibuat. Ubah kode salah satunya.")
+                            print(message)
+                            write_date = self.get_write_date(model_name, record['id'])
+                            self.set_log_mc.create_log_note_failed(record, 'Journal', message, write_date)
+                            self.set_log_ss.create_log_note_failed(record, 'Journal', message, write_date)
                             return
                         
                         # Prepare journal data
@@ -4409,10 +4436,14 @@ class DataTransaksiMCtoSS:
                     self.set_log_mc.create_log_note_failed(record, 'Journal', message_exception, write_date)    
                     self.set_log_ss.create_log_note_failed(record, 'Journal', message_exception, write_date)
 
-            # Use ThreadPoolExecutor to process records concurrently
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(process_journal_account, record) for record in journal_account]
-                concurrent.futures.wait(futures)
+            # Update journal yang sudah ada DULU (kode di store disamakan dengan MC),
+            # baru create journal baru -- supaya kode yang dibebaskan bisa dipakai.
+            to_update = [r for r in journal_account if r['id'] in existing_journal_dict]
+            to_create = [r for r in journal_account if r['id'] not in existing_journal_dict]
+            for batch in (to_update, to_create):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                    futures = [executor.submit(process_journal_account, record) for record in batch]
+                    concurrent.futures.wait(futures)
 
         except Exception as e:
             print(f"Gagal membuat atau memposting Payment Method di Source baru: {e}")
