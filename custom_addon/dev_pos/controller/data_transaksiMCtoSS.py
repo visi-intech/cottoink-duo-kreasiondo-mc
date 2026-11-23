@@ -2322,8 +2322,75 @@ class DataTransaksiMCtoSS:
                     batch = loyalty_points[i:i + 100]
                     executor.map(process_loyalty_point, batch)
 
+    # Field TS In di MC yang ikut dikirim ke Store (dari vit_transfer_request).
+    TS_IN_EXTRA_FIELDS = ['vit_warehouse_id', 'vit_warehouse_dest_id', 'vit_transfer_type_id', 'transfer_out_id']
+    # Field tujuan di Store (modul vit_ts_transfer). Hanya diisi kalau field-nya ada di Store.
+    TS_IN_STORE_FIELDS = ['vit_ts_warehouse_id', 'vit_ts_warehouse_dest_id',
+                          'vit_ts_transfer_type_id', 'vit_ts_transfer_out_ref']
+
+    @staticmethod
+    def _m2o_name(value):
+        """Nama dari nilai many2one hasil search_read ([id, name]); None kalau kosong."""
+        if isinstance(value, (list, tuple)) and len(value) > 1:
+            return value[1]
+        return None
+
+    def _existing_fields(self, client, model, names):
+        """Subset `names` yang benar-benar ada di `model` pada `client` (modul bisa belum terpasang)."""
+        try:
+            found = client.call_odoo('object', 'execute_kw', client.db, client.uid, client.password,
+                                     model, 'fields_get', [names], {'attributes': ['type']})
+            return [n for n in names if n in (found or {})]
+        except Exception as e:
+            print(f"fields_get {model} gagal: {e}")
+            return []
+
+    def _ts_in_extra_mappings(self, transaksi_ts_in, store_fields):
+        """Siapkan mapping MC -> Store untuk gudang asal/tujuan, transfer type, dan source location.
+        Dihitung sekali di luar thread. Mapping yang tidak ketemu dikembalikan kosong, tidak error."""
+        tgt = self.target_client
+
+        def call(model, method, args, kwargs=None):
+            return tgt.call_odoo('object', 'execute_kw', tgt.db, tgt.uid, tgt.password,
+                                 model, method, args, kwargs or {})
+
+        warehouse_names = sorted({n for r in transaksi_ts_in
+                                  for n in (self._m2o_name(r.get('vit_warehouse_id')),
+                                            self._m2o_name(r.get('vit_warehouse_dest_id'))) if n})
+        warehouse_map = {}
+        if warehouse_names and ('vit_ts_warehouse_id' in store_fields or 'vit_ts_warehouse_dest_id' in store_fields):
+            for wh in call('stock.warehouse', 'search_read', [[['name', 'in', warehouse_names]]],
+                           {'fields': ['id', 'name']}):
+                warehouse_map[wh['name']] = wh['id']
+
+        type_map = {}
+        type_names = sorted({n for n in (self._m2o_name(r.get('vit_transfer_type_id')) for r in transaksi_ts_in) if n})
+        if type_names and 'vit_ts_transfer_type_id' in store_fields:
+            for tp in call('vit.ts.transfer.type', 'search_read', [[['name', 'in', type_names]]],
+                           {'fields': ['id', 'name']}):
+                type_map[tp['name']] = tp['id']
+            for name in type_names:
+                if name in type_map:
+                    continue
+                try:  # master data jenis transaksi belum ada di Store: buat, supaya data MC ikut terbawa
+                    type_map[name] = call('vit.ts.transfer.type', 'create', [{'name': name}])
+                except Exception as e:
+                    print(f"Gagal membuat Transfer Type '{name}' di Store: {e}")
+
+        source_loc_ids = sorted({str(r['location_id'][0]) for r in transaksi_ts_in
+                                 if isinstance(r.get('location_id'), (list, tuple))})
+        location_map = {}
+        if source_loc_ids:
+            for loc in call('stock.location', 'search_read', [[['id_mc', 'in', source_loc_ids]]],
+                            {'fields': ['id', 'id_mc']}):
+                location_map[loc['id_mc']] = loc['id']
+        return warehouse_map, type_map, location_map
+
     def ts_in_from_mc(self, model_name, fields, description, date_from, date_to):
         try:
+            fields = list(fields) + [f for f in self._existing_fields(self.source_client, model_name, self.TS_IN_EXTRA_FIELDS)
+                                     if f not in fields]
+            store_fields = self._existing_fields(self.target_client, 'stock.picking', self.TS_IN_STORE_FIELDS)
             transaksi_ts_in = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                                 self.source_client.uid, self.source_client.password,
                                                                 model_name, 'search_read',
@@ -2402,6 +2469,13 @@ class DataTransaksiMCtoSS:
                                                             {'fields': ['id'], 'limit': 1})
                 if existing_ts_in:
                     existing_ts_in_dict[record['id']] = existing_ts_in[0]['id']
+
+            try:
+                warehouse_map, type_map, source_location_map = self._ts_in_extra_mappings(
+                    [r for r in transaksi_ts_in if r['id'] not in existing_ts_in_dict], store_fields)
+            except Exception as e:
+                print(f"Gagal menyiapkan mapping data TS In (gudang/transfer type/lokasi): {e}")
+                warehouse_map, type_map, source_location_map = {}, {}, {}
 
             def process_ts_in_record(record):
                 if record['id'] in existing_ts_in_dict:
@@ -2486,6 +2560,29 @@ class DataTransaksiMCtoSS:
                     'picking_type_id': int(picking_type_id),
                     'move_ids_without_package': ts_in_inventory_line_ids,
                 }
+
+                # Data tambahan dari TS Out MC. Hanya field yang ada di Store; yang tidak ketemu
+                # mappingnya dibiarkan kosong (tidak membatalkan pembuatan TS In).
+                if 'vit_ts_transfer_out_ref' in store_fields:
+                    # nomor TS Out asal: relasi transfer_out_id di MC, fallback origin (= nama TS Out)
+                    ts_in_transfer_data['vit_ts_transfer_out_ref'] = (
+                        self._m2o_name(record.get('transfer_out_id')) or record.get('origin') or False)
+                if 'vit_ts_warehouse_id' in store_fields:
+                    ts_in_transfer_data['vit_ts_warehouse_id'] = warehouse_map.get(
+                        self._m2o_name(record.get('vit_warehouse_id')), False)
+                if 'vit_ts_warehouse_dest_id' in store_fields:
+                    ts_in_transfer_data['vit_ts_warehouse_dest_id'] = warehouse_map.get(
+                        self._m2o_name(record.get('vit_warehouse_dest_id')), False)
+                if 'vit_ts_transfer_type_id' in store_fields:
+                    ts_in_transfer_data['vit_ts_transfer_type_id'] = type_map.get(
+                        self._m2o_name(record.get('vit_transfer_type_id')), False)
+                # Source Location di header dokumen = lokasi asal TS In di MC (transit). Sengaja hanya header:
+                # move tetap dari Partners/Vendors karena transit di Store tidak punya stok, kalau dipindah
+                # validasi TS In kena blokir stok negatif (stock_no_negative).
+                source_location = source_location_map.get(
+                    str(record['location_id'][0]) if isinstance(record.get('location_id'), (list, tuple)) else None)
+                if source_location:
+                    ts_in_transfer_data['location_id'] = int(source_location)
 
                 print(ts_in_transfer_data)
 
