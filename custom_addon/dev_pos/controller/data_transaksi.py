@@ -4,7 +4,8 @@ import pytz
 import re
 import concurrent.futures
 from threading import Lock
-import datetime
+# (dulu ada 'import datetime' di sini: menimpa class datetime di atas sehingga
+#  datetime.now() di pencatat log selalu error dan log note tidak pernah tersimpan)
 
 # kalau ada case store nya beda zona waktu gimana
 class DataTransaksi:
@@ -810,6 +811,35 @@ class DataTransaksi:
                         continue
                     raise
 
+        store_name = getattr(self.source_client, 'server_name', 'Store')
+
+        def log_note_mc(trx_key, message, status):
+            """Tulis langsung ke Log Note MC (target). Pesan yang sama persis (key + isi +
+            status) tidak ditulis ulang, supaya cron tidak membanjiri log."""
+            print(message)
+            try:
+                exists = self.target_client.call_odoo(
+                    'object', 'execute_kw', self.target_client.db,
+                    self.target_client.uid, self.target_client.password,
+                    'log.note', 'search_count',
+                    [[['vit_trx_key', '=', trx_key], ['vit_sync_desc', '=', message], ['vit_sync_status', '=', status]]])
+                if exists:
+                    return
+                now_utc = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                self.target_client.call_odoo(
+                    'object', 'execute_kw', self.target_client.db,
+                    self.target_client.uid, self.target_client.password,
+                    'log.note', 'create', [{
+                        'vit_doc_type': 'Invoice',
+                        'vit_trx_key': trx_key,
+                        'vit_trx_date': now_utc,
+                        'vit_sync_date': now_utc,
+                        'vit_sync_status': status,
+                        'vit_sync_desc': message,
+                    }])
+            except Exception as log_err:
+                print(f"Gagal menulis log note: {log_err}")
+
         try:
             transaksi_posorder_invoice = search_read(
                 self.source_client, model_name,
@@ -818,7 +848,12 @@ class DataTransaksi:
                 fields)
 
             if not transaksi_posorder_invoice:
-                print("Semua transaksi telah diproses.")
+                log_note_mc(
+                    f"Sync Invoice {store_name}",
+                    f"Tidak ada PoS order di {store_name} yang memenuhi syarat sync: state = invoiced, "
+                    f"is_integrated = False, create_date (UTC) antara {date_from} dan {date_to}. "
+                    f"Kalau order lebih lama, isi tanggal dari/sampai di Manual Sync.",
+                    'Info')
                 return
 
             print(f"Found {len(transaksi_posorder_invoice)} PoS order invoice to transfer")
@@ -852,8 +887,15 @@ class DataTransaksi:
                             'object', 'execute_kw', self.source_client.db,
                             self.source_client.uid, self.source_client.password,
                             'pos.order', 'write', [[record['id']], {'is_integrated': True, 'id_mc': target_id}])
+                        log_note_mc(record.get('name'),
+                                    f"Order {record.get('name')} sudah ada di MC (ID {target_id}); "
+                                    f"tidak dibuat ulang, hanya ditandai Integrated di {store_name}.",
+                                    'Success')
                     except Exception as e:
-                        print(f"Gagal menandai order {record.get('name')} sebagai integrated: {e}")
+                        log_note_mc(record.get('name'),
+                                    f"Order {record.get('name')} sudah ada di MC (ID {target_id}) tetapi gagal "
+                                    f"ditandai Integrated di {store_name}: {e}",
+                                    'Failed')
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     list(executor.map(mark_integrated, already_exists))
@@ -1152,9 +1194,10 @@ class DataTransaksi:
             print(f"✅ Finished processing all {len(to_process)} orders")
 
         except Exception as e:
-            print(f"❌ Error during processing: {e}")
             import traceback
             print(traceback.format_exc())
+            log_note_mc(f"Sync Invoice {store_name}",
+                        f"Sync invoice dari {store_name} berhenti karena error: {e}", 'Failed')
 
     def transfer_pos_order_invoice_ss_to_mc_session_closed_before_inv(self, model_name, fields, description, date_from, date_to):
         try:
@@ -3216,7 +3259,7 @@ class DataTransaksi:
 
 
     def transfer_stock_adjustment(self, model_name, fields, description, date_from, date_to):
-        start_time = datetime.datetime.now()
+        start_time = datetime.now()
         write_date = start_time.strftime('%Y-%m-%d %H:%M:%S')
 
         try:
@@ -3323,7 +3366,7 @@ class DataTransaksi:
                         batched_data.append((move, move_line, record['id']))
                         success_count += 1
 
-                    end_time = datetime.datetime.now()
+                    end_time = datetime.now()
                     duration = str(end_time - start_time)
                     self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'Physical Inventory', write_date)
                     self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'Physical Inventory', write_date)
@@ -3370,7 +3413,7 @@ class DataTransaksi:
             return True
 
         except Exception as e:
-            end_time = datetime.datetime.now()
+            end_time = datetime.now()
             duration = str(end_time - start_time)
             message_exception = str(e)
 
