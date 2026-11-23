@@ -52,6 +52,78 @@ class DataTransaksiMCtoSS:
             return location_dest_id, location_id
         return location_id, location_dest_id
 
+    def reconcile_id_mc(self, model, match_field='name', store_field=None):
+        """Isi / betulkan id_mc di store untuk record yang SUDAH terbentuk di store,
+        dicocokkan dengan record MC lewat match_field (default: name).
+        Berjalan setiap sync tanpa melihat is_integrated / index_store, jadi aman untuk
+        data lama dan untuk banyak store (dipanggil per store).
+        store_field: field Many2one di MC yang menunjuk store pemilik record (mis.
+        'is_store' di pos.payment.method). Record MC milik store lain diabaikan;
+        record milik store ini diutamakan dibanding record tanpa store."""
+        try:
+            sid = self._current_store_id()
+            src_fields = [match_field] + ([store_field] if store_field else [])
+            source = self.source_client.call_odoo(
+                'object', 'execute_kw', self.source_client.db,
+                self.source_client.uid, self.source_client.password,
+                model, 'search_read', [[]],
+                {'fields': src_fields, 'context': {'active_test': False}})
+
+            candidates = {}   # nilai match_field -> [(prioritas, id MC)]
+            for rec in source:
+                key = rec.get(match_field)
+                if not key:
+                    continue
+                owner = rec.get(store_field) if store_field else False
+                owner = owner[0] if isinstance(owner, list) else owner
+                if store_field and owner and owner != sid:
+                    continue          # milik store lain
+                priority = 0 if (store_field and owner == sid) else 1
+                candidates.setdefault(key, []).append((priority, rec['id']))
+
+            target_fields = self.target_client.call_odoo(
+                'object', 'execute_kw', self.target_client.db,
+                self.target_client.uid, self.target_client.password,
+                model, 'fields_get', [['id_mc']], {'attributes': ['type']}) or {}
+            if 'id_mc' not in target_fields:
+                print(f"⚠️ {model} di store tidak punya field id_mc, rekonsiliasi dilewati.")
+                return
+            id_mc_is_int = target_fields['id_mc'].get('type') == 'integer'
+
+            target = self.target_client.call_odoo(
+                'object', 'execute_kw', self.target_client.db,
+                self.target_client.uid, self.target_client.password,
+                model, 'search_read', [[]],
+                {'fields': [match_field, 'id_mc'], 'context': {'active_test': False}})
+
+            updated, ambiguous = 0, []
+            for rec in target:
+                cands = sorted(candidates.get(rec.get(match_field), []))
+                if not cands:
+                    continue
+                best = [c for c in cands if c[0] == cands[0][0]]
+                if len(best) > 1:
+                    ambiguous.append(rec.get(match_field))
+                    continue
+                mc_id = best[0][1]
+                if str(rec.get('id_mc') or '') == str(mc_id):
+                    continue
+                self.target_client.call_odoo(
+                    'object', 'execute_kw', self.target_client.db,
+                    self.target_client.uid, self.target_client.password,
+                    model, 'write', [[rec['id']], {'id_mc': mc_id if id_mc_is_int else str(mc_id)}])
+                updated += 1
+
+            print(f"🔗 Rekonsiliasi id_mc {model} ke {self.target_client.server_name}: {updated} diperbarui")
+            if ambiguous:
+                message = (f"id_mc tidak diisi karena nama ganda di MC ({model}): "
+                           f"{', '.join(sorted(set(map(str, ambiguous))))}")
+                print(f"⚠️ {message}")
+                self.set_log_mc.create_log_note_failed(
+                    {'name': model}, f'Rekonsiliasi id_mc {model}', message, None)
+        except Exception as e:
+            print(f"⚠️ Gagal rekonsiliasi id_mc {model}: {e}")
+
     def _not_synced_domain(self):
         """Domain 'store ini belum ada di index_store' (kosong kalau store tidak dikenal)."""
         sid = self._current_store_id()
@@ -3852,8 +3924,18 @@ class DataTransaksiMCtoSS:
             payment_method = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                         self.source_client.uid, self.source_client.password,
                                                         model_name, 'search_read',
-                                                        [[['is_integrated', '=', False], ['config_ids', '!=', False]]],
+                                                        [[['config_ids', '!=', False]]],
                                                         {'fields': fields})
+
+            # Hanya payment method milik store ini (is_store = store ini) atau tanpa store.
+            # Sebelumnya: hanya is_integrated=False -> setelah terkirim ke store pertama,
+            # store lain tidak pernah menerima / ter-update.
+            current_store_id = self._current_store_id()
+            payment_method = [
+                record for record in (payment_method or [])
+                if not record.get('is_store')
+                or (record['is_store'][0] if isinstance(record['is_store'], list) else record['is_store']) == current_store_id
+            ]
 
             if not payment_method:
                 print("Tidak ada method yang ditemukan untuk ditransfer")
@@ -3897,7 +3979,7 @@ class DataTransaksiMCtoSS:
                 existing_payment = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                 self.target_client.uid, self.target_client.password,
                                                                 'pos.payment.method', 'search_read',
-                                                                [[['name', '=', record.get('vit_trxid')]]],
+                                                                [[['name', '=', record.get('name')]]],
                                                                 {'fields': ['id']})
                 if existing_payment:
                     existing_payment_method_dict[record['id']] = existing_payment[0]['id']
@@ -3914,7 +3996,8 @@ class DataTransaksiMCtoSS:
                 print("Tidak ada Setting Config yang valid untuk ditransfer")
                 return
 
-            setting_config_id = setting_config_ids[0]['id']
+            # store yang sedang di-sync (bukan store linked pertama)
+            setting_config_id = current_store_id or setting_config_ids[0]['id']
 
             def process_payment_method_record_from_mc(record):
                 # Debug record journal_id

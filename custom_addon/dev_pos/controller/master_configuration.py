@@ -162,6 +162,8 @@ class SettingConfig(models.Model):
         for ss_client in ss_clients:
             integrator_master = DataIntegrator(mc_client, ss_client) # belum ditambahkan is_store dan is_cashier
             integrator_master.transfer_data('hr.employee', ['name', 'mobile_phone', 'work_phone', 'work_email', 'is_sales', 'is_cashier', 'create_date', 'write_date'], 'Sales Employee', date_from, date_to)
+            # Betulkan id_mc employee yang sudah terlanjur ada di store (setiap store)
+            DataTransaksiMCtoSS(mc_client, ss_client).reconcile_id_mc('hr.employee')
             
     def create_master_item_utility(self, mc, ss, datefrom, dateto):
         if mc and ss:
@@ -304,6 +306,8 @@ class SettingConfig(models.Model):
             integrator_transaksiMCtoSS.journal_account_from_mc('account.journal', ['id', 'name', 'type', 'refund_sequence', 'is_store', 'code', 'account_control_ids', 'invoice_reference_type', 'invoice_reference_model' ], 'Transaksi Journal', datefrom, dateto)
             integrator_transaksiMCtoSS.pos_config_from_mc('pos.config', ['id', 'name', 'module_pos_hr', 'is_store', 'is_posbox', 'other_devices'], 'Transaksi PoS Config', datefrom, dateto)
             integrator_transaksiMCtoSS.payment_method_from_mc('pos.payment.method', ['id', 'name', 'is_online_payment', 'is_store', 'split_transactions', 'journal_id', 'config_ids'], 'Transaksi PoS Payment Method', datefrom, dateto)
+            # Betulkan id_mc payment method yang sudah terlanjur ada di store (setiap store)
+            integrator_transaksiMCtoSS.reconcile_id_mc('pos.payment.method', store_field='is_store')
 
     def create_master_pricelist(self, mc, ss, datefrom, dateto):
         if mc and ss:
