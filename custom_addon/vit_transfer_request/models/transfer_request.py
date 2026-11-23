@@ -67,6 +67,10 @@ class TransferRequest(models.Model):
 
     picking_ids = fields.One2many('stock.picking', 'vit_transfer_request_id', string='Transfer Out')
     picking_count = fields.Integer(string='Transfer Out Count', compute='_compute_picking_count')
+    has_active_transfer_out = fields.Boolean(
+        string='Has Active Transfer Out', compute='_compute_has_active_transfer_out',
+        help='True kalau sudah ada Transfer Out yang tidak Cancelled. Dipakai untuk menyembunyikan tombol '
+             'Rilis Transfer Out dan mengunci form Transfer Request.')
     total_qty_requested = fields.Float(string='Total Requested', compute='_compute_total_qty', digits=(16, 3))
     total_qty_transferred = fields.Float(string='Total Transferred', compute='_compute_total_qty', digits=(16, 3))
 
@@ -78,6 +82,12 @@ class TransferRequest(models.Model):
     def _compute_picking_count(self):
         for record in self:
             record.picking_count = len(record.picking_ids)
+
+    @api.depends('picking_ids.state')
+    def _compute_has_active_transfer_out(self):
+        for record in self:
+            record.has_active_transfer_out = bool(
+                record.picking_ids.filtered(lambda p: p.state != 'cancel'))
 
     @api.depends('line_ids.product_uom_qty', 'line_ids.qty_transferred')
     def _compute_total_qty(self):
@@ -203,6 +213,14 @@ class TransferRequest(models.Model):
             raise UserError(_("Transfer Out hanya bisa dibuat dari request dengan status In Progress."))
         if not self.line_ids:
             raise UserError(_("Transfer Request %s belum punya item.", self.doc_num))
+        # Guard anti dobel: tombol sudah disembunyikan di UI, ini jaga-jaga untuk klik ganda /
+        # form yang belum ke-refresh. Row dikunci dulu supaya klik paralel menunggu, lalu re-read dari DB.
+        self.env.cr.execute("SELECT id FROM transfer_request WHERE id = %s FOR UPDATE", (self.id,))
+        self.invalidate_recordset(['picking_ids'])
+        active_pickings = self.picking_ids.filtered(lambda p: p.state != 'cancel')
+        if active_pickings:
+            raise UserError(_("Request %s sudah punya Transfer Out (%s). Transfer Out tidak bisa dibuat dua kali.",
+                              self.doc_num, ', '.join(active_pickings.mapped('name'))))
 
         precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
         lines = self.line_ids.filtered(
