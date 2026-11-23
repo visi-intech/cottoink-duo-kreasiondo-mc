@@ -223,14 +223,9 @@ class TransferRequest(models.Model):
         if self.state == 'approved':
             self.state = 'in_progress'
 
-        return {
-            'type': 'ir.actions.act_window',
-            'name': _('Transfer Out'),
-            'res_model': 'stock.picking',
-            'res_id': picking.id,
-            'view_mode': 'form',
-            'target': 'current',
-        }
+        # Sengaja tidak me-return action: user tetap di form Transfer Request (form di-reload,
+        # smart button Transfer Out & chatter ter-update). TS Out dibuka lewat smart button.
+        return True
 
     def action_view_transfer_out(self):
         self.ensure_one()

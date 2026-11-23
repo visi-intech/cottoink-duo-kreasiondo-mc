@@ -12,7 +12,7 @@
               decoration-success="state == 'done'">
           <field name="doc_num" string="Request Number"/>
           <field name="request_date" string="Request Date"/>
-          <field name="request_type" string="Request Type"/>
+          <field name="transfer_type_id" string="Transfer Type"/>
           <field name="warehouse_id" string="Source Warehouse"/>
           <field name="warehouse_dest_id" string="Destination Warehouse"/>
           <field name="requested_by_id" string="Requested By"/>
@@ -35,7 +35,7 @@
                     class="oe_highlight" invisible="state != 'draft'"/>
             <button name="action_approve" string="Approve" type="object"
                     class="oe_highlight" invisible="state != 'to_approve'"/>
-            <button name="action_create_transfer_out" string="Create Transfer Out" type="object"
+            <button name="action_create_transfer_out" string="Rilis Transfer Out" type="object"
                     class="oe_highlight" invisible="state not in ('approved', 'in_progress')"/>
             <button name="action_reset_draft" string="Reset to Draft" type="object"
                     invisible="state not in ('to_approve', 'approved', 'cancel')"/>
@@ -58,7 +58,6 @@
             </div>
             <group>
               <group string="Request">
-                <field name="request_type" readonly="state != 'draft'"/>
                 <field name="transfer_type_id" readonly="state != 'draft'"/>
                 <field name="request_date" readonly="state != 'draft'"/>
                 <field name="scheduled_date" readonly="state in ('done', 'cancel')"/>
@@ -114,6 +113,7 @@
       <field name="arch" type="xml">
         <search>
           <field name="doc_num"/>
+          <field name="transfer_type_id"/>
           <field name="warehouse_id"/>
           <field name="warehouse_dest_id"/>
           <field name="requested_by_id"/>
@@ -124,13 +124,10 @@
           <filter name="filter_in_progress" string="In Progress" domain="[('state', '=', 'in_progress')]"/>
           <filter name="filter_done" string="Done" domain="[('state', '=', 'done')]"/>
           <separator/>
-          <filter name="filter_allocation" string="Alokasi ke Store" domain="[('request_type', '=', 'allocation')]"/>
-          <filter name="filter_borrow" string="Peminjaman ke WH" domain="[('request_type', '=', 'borrow')]"/>
-          <separator/>
           <filter name="filter_not_integrated" string="Belum Terintegrasi" domain="[('is_integrated', '=', False)]"/>
           <group expand="0" string="Group By">
             <filter name="group_state" string="Status" context="{'group_by': 'state'}"/>
-            <filter name="group_request_type" string="Request Type" context="{'group_by': 'request_type'}"/>
+            <filter name="group_transfer_type" string="Transfer Type" context="{'group_by': 'transfer_type_id'}"/>
             <filter name="group_warehouse" string="Source Warehouse" context="{'group_by': 'warehouse_id'}"/>
             <filter name="group_warehouse_dest" string="Destination Warehouse" context="{'group_by': 'warehouse_dest_id'}"/>
             <filter name="group_request_date" string="Request Date" context="{'group_by': 'request_date'}"/>
