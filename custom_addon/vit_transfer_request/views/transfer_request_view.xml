@@ -33,7 +33,7 @@
           <header>
             <button name="action_submit" string="Submit" type="object"
                     class="oe_highlight" invisible="state != 'draft'"/>
-            <button name="action_create_transfer_out" string="Rilis Transfer Out" type="object"
+            <button name="action_create_transfer_out" string="Confirm" type="object"
                     class="oe_highlight" invisible="state != 'in_progress' or has_active_transfer_out"/>
             <button name="action_reset_draft" string="Reset to Draft" type="object"
                     invisible="state != 'cancel'"/>
