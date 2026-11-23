@@ -1,6 +1,6 @@
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError, ValidationError
-from odoo.tools import float_compare, float_is_zero
+from odoo.tools import float_compare
 
 import logging
 
@@ -54,12 +54,10 @@ class TransferRequest(models.Model):
 
     state = fields.Selection([
         ('draft', 'Draft'),
-        ('to_approve', 'To Approve'),
-        ('approved', 'Approved'),
         ('in_progress', 'In Progress'),
         ('done', 'Done'),
         ('cancel', 'Cancelled'),
-    ], string='Status', default='draft', required=True, readonly=True, copy=False, tracking=True)
+    ], string='Status', default='in_progress', required=True, readonly=True, copy=False, tracking=True)
 
     line_ids = fields.One2many('transfer.request.line', 'request_id', string='Request Lines', copy=True)
 
@@ -115,13 +113,14 @@ class TransferRequest(models.Model):
 
     def unlink(self):
         for record in self:
-            if record.state not in ('draft', 'cancel'):
+            # Dokumen baru langsung In Progress, jadi masih boleh dihapus selama belum punya Transfer Out.
+            if record.state == 'done' or (record.state == 'in_progress' and record.picking_ids):
                 raise UserError(_("Transfer Request %s tidak bisa dihapus karena statusnya %s.",
                                   record.doc_num, record.state))
         return super(TransferRequest, self).unlink()
 
     # ------------------------------------------------------------------
-    # Workflow IT-01: MD membuat dan approve Transfer Request
+    # Workflow IT-01: MD membuat Transfer Request (langsung In Progress, tanpa approval)
     # ------------------------------------------------------------------
     def action_submit(self):
         for record in self:
@@ -129,13 +128,7 @@ class TransferRequest(models.Model):
                 raise UserError(_("Hanya request dengan status Draft yang bisa disubmit."))
             if not record.line_ids:
                 raise UserError(_("Transfer Request %s belum punya item.", record.doc_num))
-            record.state = 'to_approve'
-
-    def action_approve(self):
-        for record in self:
-            if record.state != 'to_approve':
-                raise UserError(_("Hanya request dengan status To Approve yang bisa di-approve."))
-            record.state = 'approved'
+            record.state = 'in_progress'
 
     def action_cancel(self):
         for record in self:
@@ -147,7 +140,7 @@ class TransferRequest(models.Model):
 
     def action_reset_draft(self):
         for record in self:
-            if record.state not in ('to_approve', 'approved', 'cancel'):
+            if record.state != 'cancel':
                 raise UserError(_("Request %s tidak bisa dikembalikan ke Draft.", record.doc_num))
             if record.picking_ids:
                 raise UserError(_("Request %s sudah punya Transfer Out, tidak bisa dikembalikan ke Draft.",
@@ -206,8 +199,10 @@ class TransferRequest(models.Model):
 
     def action_create_transfer_out(self):
         self.ensure_one()
-        if self.state not in ('approved', 'in_progress'):
-            raise UserError(_("Transfer Out hanya bisa dibuat dari request yang sudah Approved."))
+        if self.state != 'in_progress':
+            raise UserError(_("Transfer Out hanya bisa dibuat dari request dengan status In Progress."))
+        if not self.line_ids:
+            raise UserError(_("Transfer Request %s belum punya item.", self.doc_num))
 
         precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
         lines = self.line_ids.filtered(
@@ -220,8 +215,6 @@ class TransferRequest(models.Model):
             self._prepare_transfer_out_values(picking_type, lines))
 
         self.message_post(body=_("Transfer Out %s dibuat dari request ini.", picking.name))
-        if self.state == 'approved':
-            self.state = 'in_progress'
 
         # Sengaja tidak me-return action: user tetap di form Transfer Request (form di-reload,
         # smart button Transfer Out & chatter ter-update). TS Out dibuka lewat smart button.
@@ -239,10 +232,10 @@ class TransferRequest(models.Model):
         }
 
     def _update_fulfilment_state(self):
-        """Dipanggil setelah Transfer Out divalidasi, untuk maju ke In Progress / Done."""
+        """Dipanggil setelah Transfer Out divalidasi, untuk maju ke Done kalau semua item sudah ditransfer."""
         precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
         for record in self:
-            if record.state not in ('approved', 'in_progress'):
+            if record.state != 'in_progress':
                 continue
             lines = record.line_ids
             if not lines:
@@ -252,9 +245,6 @@ class TransferRequest(models.Model):
                 for line in lines)
             if fully_transferred:
                 record.state = 'done'
-            elif any(not float_is_zero(line.qty_transferred, precision_digits=precision)
-                     for line in lines):
-                record.state = 'in_progress'
 
 
 class TransferRequestLine(models.Model):

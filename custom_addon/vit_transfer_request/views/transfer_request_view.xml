@@ -33,16 +33,14 @@
           <header>
             <button name="action_submit" string="Submit" type="object"
                     class="oe_highlight" invisible="state != 'draft'"/>
-            <button name="action_approve" string="Approve" type="object"
-                    class="oe_highlight" invisible="state != 'to_approve'"/>
             <button name="action_create_transfer_out" string="Rilis Transfer Out" type="object"
-                    class="oe_highlight" invisible="state not in ('approved', 'in_progress')"/>
+                    class="oe_highlight" invisible="state != 'in_progress'"/>
             <button name="action_reset_draft" string="Reset to Draft" type="object"
-                    invisible="state not in ('to_approve', 'approved', 'cancel')"/>
+                    invisible="state != 'cancel'"/>
             <button name="action_cancel" string="Cancel" type="object"
                     invisible="state in ('done', 'cancel')"/>
             <field name="state" widget="statusbar"
-                   statusbar_visible="draft,to_approve,approved,in_progress,done"/>
+                   statusbar_visible="in_progress,done"/>
           </header>
           <sheet>
             <div class="oe_button_box" name="button_box">
@@ -58,17 +56,17 @@
             </div>
             <group>
               <group string="Request">
-                <field name="transfer_type_id" readonly="state != 'draft'"/>
-                <field name="request_date" readonly="state != 'draft'"/>
+                <field name="transfer_type_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
+                <field name="request_date" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
                 <field name="scheduled_date" readonly="state in ('done', 'cancel')"/>
-                <field name="requested_by_id" readonly="state != 'draft'"/>
-                <field name="company_id" groups="base.group_multi_company" readonly="state != 'draft'"/>
+                <field name="requested_by_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
+                <field name="company_id" groups="base.group_multi_company" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
               </group>
               <group string="Lokasi">
-                <field name="warehouse_id" readonly="state != 'draft'"/>
-                <field name="location_id" readonly="state != 'draft'"/>
-                <field name="warehouse_dest_id" readonly="state != 'draft'"/>
-                <field name="location_dest_id" readonly="state != 'draft'"/>
+                <field name="warehouse_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
+                <field name="location_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
+                <field name="warehouse_dest_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
+                <field name="location_dest_id" readonly="state in ('done', 'cancel') or picking_count &gt; 0"/>
               </group>
             </group>
             <group string="Integrasi SAP">
@@ -119,8 +117,6 @@
           <field name="requested_by_id"/>
           <field name="vit_trxid"/>
           <filter name="filter_draft" string="Draft" domain="[('state', '=', 'draft')]"/>
-          <filter name="filter_to_approve" string="To Approve" domain="[('state', '=', 'to_approve')]"/>
-          <filter name="filter_approved" string="Approved" domain="[('state', '=', 'approved')]"/>
           <filter name="filter_in_progress" string="In Progress" domain="[('state', '=', 'in_progress')]"/>
           <filter name="filter_done" string="Done" domain="[('state', '=', 'done')]"/>
           <separator/>

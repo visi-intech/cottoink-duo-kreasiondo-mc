@@ -16,8 +16,8 @@ import logging
 _logger = logging.getLogger(__name__)
 
 # State yang sudah boleh ditarik SAP jadi dokumen Transfer Request.
-# Draft / To Approve belum final, jadi tidak ikut dikirim.
-INTEGRATION_STATES = ['approved', 'in_progress', 'done']
+# Draft belum final, jadi tidak ikut dikirim.
+INTEGRATION_STATES = ['in_progress', 'done']
 
 
 class TransferRequestAPI(http.Controller):
