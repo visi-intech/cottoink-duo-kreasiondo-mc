@@ -2325,7 +2325,7 @@ class DataTransaksiMCtoSS:
     # Field TS In di MC yang ikut dikirim ke Store (dari vit_transfer_request).
     TS_IN_EXTRA_FIELDS = ['vit_warehouse_id', 'vit_warehouse_dest_id', 'vit_transfer_type_id', 'transfer_out_id']
     # Field tujuan di Store (modul vit_ts_transfer). Hanya diisi kalau field-nya ada di Store.
-    TS_IN_STORE_FIELDS = ['vit_ts_warehouse_id', 'vit_ts_warehouse_dest_id',
+    TS_IN_STORE_FIELDS = ['vit_ts_source_warehouse', 'vit_ts_warehouse_dest_id',
                           'vit_ts_transfer_type_id', 'vit_ts_transfer_out_ref']
 
     @staticmethod
@@ -2358,7 +2358,8 @@ class DataTransaksiMCtoSS:
                                   for n in (self._m2o_name(r.get('vit_warehouse_id')),
                                             self._m2o_name(r.get('vit_warehouse_dest_id'))) if n})
         warehouse_map = {}
-        if warehouse_names and ('vit_ts_warehouse_id' in store_fields or 'vit_ts_warehouse_dest_id' in store_fields):
+        # hanya Destination Warehouse yang masih many2one di Store; Source Warehouse sudah Char (diisi nama)
+        if warehouse_names and 'vit_ts_warehouse_dest_id' in store_fields:
             for wh in call('stock.warehouse', 'search_read', [[['name', 'in', warehouse_names]]],
                            {'fields': ['id', 'name']}):
                 warehouse_map[wh['name']] = wh['id']
@@ -2567,9 +2568,10 @@ class DataTransaksiMCtoSS:
                     # nomor TS Out asal: relasi transfer_out_id di MC, fallback origin (= nama TS Out)
                     ts_in_transfer_data['vit_ts_transfer_out_ref'] = (
                         self._m2o_name(record.get('transfer_out_id')) or record.get('origin') or False)
-                if 'vit_ts_warehouse_id' in store_fields:
-                    ts_in_transfer_data['vit_ts_warehouse_id'] = warehouse_map.get(
-                        self._m2o_name(record.get('vit_warehouse_id')), False)
+                if 'vit_ts_source_warehouse' in store_fields:
+                    # Char biasa, sama seperti TS Out Reference: cukup nama gudang asal dari MC
+                    ts_in_transfer_data['vit_ts_source_warehouse'] = (
+                        self._m2o_name(record.get('vit_warehouse_id')) or False)
                 if 'vit_ts_warehouse_dest_id' in store_fields:
                     ts_in_transfer_data['vit_ts_warehouse_dest_id'] = warehouse_map.get(
                         self._m2o_name(record.get('vit_warehouse_dest_id')), False)
