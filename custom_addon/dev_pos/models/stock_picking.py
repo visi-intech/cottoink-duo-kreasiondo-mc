@@ -1,9 +1,13 @@
 import requests
 from datetime import datetime, timedelta
 import pytz
-from odoo import models, fields, api, SUPERUSER_ID
+from odoo import models, fields, api, SUPERUSER_ID, _
 from odoo.exceptions import UserError
+from odoo.tools import float_compare
 import random
+
+# Nama operation type TS In (lowercase, spasi dinormalisasi)
+TS_IN_TYPE_NAMES = {'ts in', 'transfer in'}
 
 class StockPicking(models.Model):
     _inherit = 'stock.picking'
@@ -48,13 +52,59 @@ class StockPicking(models.Model):
         
     #     return super(StockPicking, self).write(vals)
 
+    def _is_ts_in(self):
+        """True kalau operation type dokumen ini TS In / Transfer In.
+        Nama dicek toleran (huruf besar/kecil & spasi), di bahasa user dan en_US."""
+        self.ensure_one()
+        picking_type = self.picking_type_id
+        if not picking_type or picking_type.code != 'internal':
+            return False
+        names = {
+            ' '.join((picking_type.name or '').split()).casefold(),
+            ' '.join((picking_type.with_context(lang='en_US').name or '').split()).casefold(),
+        }
+        return bool(names & TS_IN_TYPE_NAMES)
+
+    def _check_ts_in_quantity(self):
+        """Blokir validate TS In jika ada Quantity < Demand."""
+        for picking in self:
+            if not picking._is_ts_in():
+                continue
+
+            kurang = []
+            for move in picking.move_ids.filtered(lambda m: m.state != 'cancel'):
+                rounding = move.product_uom.rounding
+                if float_compare(move.quantity, move.product_uom_qty, precision_rounding=rounding) < 0:
+                    kurang.append(_(
+                        "- [%(code)s] %(name)s: Quantity %(qty)s dari Demand %(demand)s %(uom)s",
+                        code=move.product_id.default_code or '-',
+                        name=move.product_id.name,
+                        qty=move.quantity,
+                        demand=move.product_uom_qty,
+                        uom=move.product_uom.name,
+                    ))
+
+            if kurang:
+                raise UserError(_(
+                    "Tidak dapat memvalidasi %(doc)s.\n\n"
+                    "Quantity yang diterima kurang dari Demand untuk produk berikut:\n"
+                    "%(lines)s\n\n"
+                    "Pastikan seluruh Quantity sudah sesuai dengan Demand sebelum Validate.",
+                    doc=picking.name,
+                    lines="\n".join(kurang),
+                ))
+
     def button_validate(self):
-        # Check if the operation type is 'Internal Transfers'
-        if self.picking_type_id.code == 'internal':
-            # Check if the source and destination locations are the same
-            if self.location_id.id == self.location_dest_id.id:
-                raise UserError("Cannot validate this operation: Source and destination locations are the same.")
-        
+        for picking in self:
+            # Check if the operation type is 'Internal Transfers'
+            if picking.picking_type_id.code == 'internal':
+                # Check if the source and destination locations are the same
+                if picking.location_id.id == picking.location_dest_id.id:
+                    raise UserError("Cannot validate this operation: Source and destination locations are the same.")
+
+        # TS In: Quantity tidak boleh kurang dari Demand
+        self._check_ts_in_quantity()
+
         # Call the super method
         res = super(StockPicking, self).button_validate()
         return res

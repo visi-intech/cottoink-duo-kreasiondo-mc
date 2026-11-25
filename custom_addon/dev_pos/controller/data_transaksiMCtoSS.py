@@ -2373,6 +2373,8 @@ class DataTransaksiMCtoSS:
     # Field loyalty.program yang hanya ada kalau modul tertentu terpasang di Store
     # (sale_ok -> modul sale_loyalty). Kalau tidak ada di Store, tidak dikirim.
     LOYALTY_OPTIONAL_FIELDS = ['sale_ok', 'schedule_ids', 'member_ids']
+    # is_online_payment -> modul pos_online_payment (belum tentu terpasang di Store)
+    PAYMENT_METHOD_OPTIONAL_FIELDS = ['is_online_payment']
 
     def _strip_missing_target_fields(self, model, vals, optional_fields):
         """Hapus dari `vals` field opsional yang tidak ada di `model` pada Store target.
@@ -4165,14 +4167,18 @@ class DataTransaksiMCtoSS:
                 if record['id'] in existing_payment_method_dict:
                     # Update id_mc on target_client if payment method exists
                     try:
+                        update_vals = {
+                            'id_mc': record.get('id'), 'is_updated': True,
+                            'journal_id': int(journal_id), 'config_ids': target_pos_config_ids,
+                            'is_online_payment': record.get('is_online_payment') if record.get('is_online_payment') else False,
+                            'split_transactions': record.get('split_transactions') if record.get('split_transactions') else False,
+                        }
+                        self._strip_missing_target_fields('pos.payment.method', update_vals,
+                                                          self.PAYMENT_METHOD_OPTIONAL_FIELDS)
                         self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                     self.target_client.uid, self.target_client.password,
                                                     'pos.payment.method', 'write',
-                                                    [[existing_payment_method_dict[record['id']]],
-                                                    {'id_mc': record.get('id'), 'is_updated': True, 
-                                                     'journal_id': int(journal_id), 'config_ids': target_pos_config_ids,
-                                                     'is_online_payment': record.get('is_online_payment') if record.get('is_online_payment') else False,
-                                                    'split_transactions': record.get('split_transactions') if record.get('split_transactions') else False,}])
+                                                    [[existing_payment_method_dict[record['id']]], update_vals])
                         print(f"id_mc updated for existing Payment Method with ID: {existing_payment_method_dict[record['id']]}")
                     except Exception as e:
                         self._log_sync_failed('Payment Method',
@@ -4192,6 +4198,8 @@ class DataTransaksiMCtoSS:
                             'config_ids': target_pos_config_ids,
                             'id_mc': record.get('id')
                         }
+                        self._strip_missing_target_fields('pos.payment.method', payment_method_transfer_data,
+                                                          self.PAYMENT_METHOD_OPTIONAL_FIELDS)
 
                         try:
                             new_payment = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
@@ -4488,6 +4496,30 @@ class DataTransaksiMCtoSS:
                                                            ('loss_account_id', loss_account_id)):
                                 if account_id:
                                     update_vals[field_name] = int(account_id)
+
+                            # Odoo menolak ganti type journal yang sudah dipakai payment method POS.
+                            # Kalau begitu, type tidak dikirim (field lain tetap di-update) dan dicatat.
+                            type_note = None
+                            target_journal_id = existing_journal_dict[record['id']]
+                            target_journal = self.target_client.call_odoo(
+                                'object', 'execute_kw', self.target_client.db,
+                                self.target_client.uid, self.target_client.password,
+                                'account.journal', 'read', [[target_journal_id], ['type']])
+                            target_type = target_journal[0]['type'] if target_journal else None
+                            if target_type and target_type != update_vals.get('type'):
+                                used_by_payment = self.target_client.call_odoo(
+                                    'object', 'execute_kw', self.target_client.db,
+                                    self.target_client.uid, self.target_client.password,
+                                    'pos.payment.method', 'search_count',
+                                    [[['journal_id', '=', target_journal_id]]],
+                                    {'context': {'active_test': False}})
+                                if used_by_payment:
+                                    update_vals.pop('type')
+                                    type_note = (f"Journal '{record.get('name')}' ({record.get('code')}): type di store "
+                                                 f"'{target_type}' berbeda dengan MC '{record.get('type')}', tetapi tidak "
+                                                 f"diubah karena journal sudah dipakai payment method POS. "
+                                                 f"Field lain tetap ter-update.")
+
                             self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                         self.target_client.uid, self.target_client.password,
                                                         'account.journal', 'write',
@@ -4500,6 +4532,8 @@ class DataTransaksiMCtoSS:
                                 [[record['id']], {'is_integrated': True}] # , 'is_updated': True
                             )
                             print(f"id_mc and is_integrated updated for existing Journal with ID: {existing_journal_dict[record['id']]}")
+                            if type_note:
+                                self._log_sync_failed('Journal', type_note, record, model_name)
                         except Exception as e:
                             self._log_sync_failed('Journal',
                                                   f"Gagal update Journal yang sudah ada di store: {e}",
