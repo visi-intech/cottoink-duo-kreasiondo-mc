@@ -1101,6 +1101,8 @@ class DataTransaksiMCtoSS:
                     discount_data['pricelist_ids'] = [(6, 0, target_pricelist_ids)]
                 if target_pos_config_ids:
                     discount_data['pos_config_ids'] = [(6, 0, target_pos_config_ids)]
+                self._strip_missing_target_fields('loyalty.program', discount_data,
+                                                  self.LOYALTY_OPTIONAL_FIELDS)
 
                 try:
                     start_time = time.time()
@@ -1877,6 +1879,8 @@ class DataTransaksiMCtoSS:
                     update_values['pos_config_ids'] = [(6, 0, target_pos_config_ids)]
                 else:
                     update_values['pos_config_ids'] = [(5, 0, 0)]
+                self._strip_missing_target_fields(model_name, update_values,
+                                                  self.LOYALTY_OPTIONAL_FIELDS)
 
                 try:
                     start_time = time.time()
@@ -2344,6 +2348,21 @@ class DataTransaksiMCtoSS:
         except Exception as e:
             print(f"fields_get {model} gagal: {e}")
             return []
+
+    # Field loyalty.program yang hanya ada kalau modul tertentu terpasang di Store
+    # (sale_ok -> modul sale_loyalty). Kalau tidak ada di Store, tidak dikirim.
+    LOYALTY_OPTIONAL_FIELDS = ['sale_ok', 'schedule_ids', 'member_ids']
+
+    def _strip_missing_target_fields(self, model, vals, optional_fields):
+        """Hapus dari `vals` field opsional yang tidak ada di `model` pada Store target.
+        Hasil fields_get di-cache per model selama objek ini hidup."""
+        cache = self.__dict__.setdefault('_target_optional_fields_cache', {})
+        if model not in cache:
+            cache[model] = set(self._existing_fields(self.target_client, model, optional_fields))
+        for name in optional_fields:
+            if name in vals and name not in cache[model]:
+                vals.pop(name)
+        return vals
 
     def _ts_in_extra_mappings(self, transaksi_ts_in, store_fields):
         """Siapkan mapping MC -> Store untuk gudang asal/tujuan, transfer type, dan source location.
