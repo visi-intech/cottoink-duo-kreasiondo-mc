@@ -1932,6 +1932,32 @@ class DataTransaksi:
                     self.set_log_ss.create_log_note_failed(record, 'Warehouse UDT', message_exception, write_date)
 
     def transfer_TSOUT_NEW(self, model_name, fields, description, date_from, date_to):
+        def log_failed(record, message):
+            """Catat error TS Out/TS In ke Log Note (Store & MC). Tidak pernah melempar error."""
+            record = record or {'name': 'TS Out/TS In'}
+            print(f"❌ [TS Out/TS In] {record.get('name')}: {message}")
+            write_date = None
+            try:
+                if record.get('id'):
+                    write_date = self.get_write_date(model_name, record['id'])
+            except Exception:
+                pass
+            for logger in (self.set_log_mc, self.set_log_ss):
+                try:
+                    logger.create_log_note_failed(record, 'TS Out/TS In', str(message), write_date)
+                except Exception as log_err:
+                    print(f"Gagal menulis log note TS Out/TS In: {log_err}")
+
+        def error_text(err):
+            """Ambil pesan singkat dari error RPC Odoo (bukan seluruh traceback)."""
+            try:
+                data = err.args[0]
+                if isinstance(data, dict):
+                    return (data.get('data') or {}).get('message') or data.get('message') or str(err)
+            except Exception:
+                pass
+            return str(err)
+
         try:
             # Ambil data dari sumber
             Ts_Out_data_source = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
@@ -2021,6 +2047,7 @@ class DataTransaksi:
             default_code_to_target_id = {template['default_code']: template['id'] for template in product_template_target_source}
 
             def process_record(record):
+                step = 'menyiapkan data'
                 try:
                     if record['id'] in existing_ts_out_invoice_dict:
                         return
@@ -2038,7 +2065,13 @@ class DataTransaksi:
                     transit_location_id = transit_location_id_dict.get(record.get('target_location')[0] if isinstance(record.get('target_location'), list) else record.get('target_location'))
 
                     if not location_id or not target_location or not picking_type_id or not transit_location_id:
-                        print(f"Missing required data for record ID {record['id']}. Skipping.")
+                        kurang = [label for label, value in (
+                            ('Source Location', location_id),
+                            ('Target Location', target_location),
+                            ('Operation Type', picking_type_id),
+                            ('Transit Location', transit_location_id),
+                        ) if not value]
+                        log_failed(record, f"Data belum ada di MC (cek id_mc / master): {', '.join(kurang)}")
                         return
 
                     missing_products = []
@@ -2101,18 +2134,21 @@ class DataTransaksi:
                         'move_ids_without_package': tsout_transfer_inventory_line_ids,
                     }
 
+                    step = 'membuat TS Out di MC'
                     new_tsout_id = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                 self.target_client.uid, self.target_client.password,
                                                                 'stock.picking', 'create',
                                                                 [tsout_transfer_data])
                     print(f"TS Out baru telah dibuat di target dengan ID: {new_tsout_id}")
 
+                    step = f'validate TS Out di MC (ID {new_tsout_id})'
                     self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                 self.target_client.uid, self.target_client.password,
                                                 'stock.picking', 'button_validate',
                                                 [[new_tsout_id]])
                     print(f"TS Out dengan ID {new_tsout_id} telah divalidasi.")
 
+                    step = 'menandai TS Out di Store sebagai integrated'
                     self.source_client.call_odoo(
                         'object', 'execute_kw', self.source_client.db,
                         self.source_client.uid, self.source_client.password,
@@ -2128,7 +2164,8 @@ class DataTransaksi:
                                                                     {'fields': ['id'], 'limit': 1})
 
                     if not picking_types_ts_in:
-                        print(f"Tidak dapat menemukan tipe picking dengan nama '{picking_type_name_ts_in}' di database target.")
+                        log_failed(record, f"TS Out sudah masuk MC, tetapi TS In tidak dibuat: operation type "
+                                           f"'{picking_type_name_ts_in}' tidak ditemukan di MC.")
                         return
 
                     picking_type_id_ts_in = picking_types_ts_in[0]['id']
@@ -2146,6 +2183,7 @@ class DataTransaksi:
 
                     # print(ts_in_transfer_data)
                     start_time = time.time()
+                    step = 'membuat TS In di MC'
                     new_ts_in_id = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                 self.target_client.uid, self.target_client.password,
                                                                 'stock.picking', 'create',
@@ -2159,15 +2197,16 @@ class DataTransaksi:
                     self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'TS Out/TS In', write_date)
                     self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'TS Out/TS In', write_date)
                 except Exception as e:
-                    message_exception = f"Gagal membuat atau memposting TS In di Source baru: {e}"
-                    self.set_log_mc.create_log_note_failed(record, 'TS Out/TS In', message_exception, write_date)
-                    self.set_log_ss.create_log_note_failed(record, 'TS Out/TS In', message_exception, write_date)
+                    log_failed(record, f"Gagal saat {step}: {error_text(e)}")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [executor.submit(process_record, record) for record in Ts_Out_data_source]
                 concurrent.futures.wait(futures)
+            for future, record in zip(futures, Ts_Out_data_source):
+                if future.exception():
+                    log_failed(record, f"Error tak terduga: {error_text(future.exception())}")
         except Exception as e:
-            print(f"Gagal membuat atau memposting TS Out di Source baru: {e}")
+            log_failed(None, f"Sync TS Out/TS In gagal: {error_text(e)}")
 
     def validate_goods_receipts_mc(self, model_name, fields, description):
         # Retrieve TS Out records that match the specified criteria from the source database
