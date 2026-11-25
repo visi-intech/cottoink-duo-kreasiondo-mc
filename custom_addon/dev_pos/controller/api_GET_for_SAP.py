@@ -15,7 +15,6 @@ import logging
 _logger = logging.getLogger(__name__)
 
 ALLOWED_ORIGINS = [
-    "http://pos-store.visi-intech.com",
     "http://172.16.186.3:8069",
     "http://172.16.186.4:8069",
 ]
