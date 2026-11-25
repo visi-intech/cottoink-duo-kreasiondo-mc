@@ -105,6 +105,306 @@ class DataIntegrator:
             self.set_log_mc.create_log_note_failed(f"Exception - {model}", f"{model} from {self.source_client.server_name} to {self.target_client.server_name}", f"Error occurred when update is_integrated: {e}", None)
             self.set_log_ss.create_log_note_failed(f"Exception - {model}", model, f"Error occurred when update is_integrated: {e}", None)
 
+    # =====================================================================
+    # MASTER PRICELIST -- SYNC CEPAT (per baris harga, incremental, batch)
+    # =====================================================================
+    PRICELIST_LINE_FIELDS = [
+        'pricelist_id', 'applied_on', 'product_tmpl_id', 'product_id', 'categ_id',
+        'min_quantity', 'fixed_price', 'date_start', 'date_end', 'compute_price',
+        'percent_price', 'base', 'price_discount', 'price_surcharge', 'price_round',
+        'price_min_margin', 'price_max_margin',
+    ]
+    PRICELIST_READ_CHUNK = 2000     # baris MC dibaca per batch
+    PRICELIST_WRITE_CHUNK = 500     # baris dibuat per RPC create
+
+    def _rpc(self, client, model, method, args, kwargs=None):
+        return client.call_odoo('object', 'execute_kw', client.db, client.uid, client.password,
+                                model, method, args, kwargs or {})
+
+    @staticmethod
+    def _m2o_id(value):
+        return value[0] if isinstance(value, list) and value else (value or False)
+
+    def _log_pricelist_failed(self, key, message):
+        print(message)
+        self.set_log_mc.create_log_note_failed(key, 'Master Pricelist', message, None)
+        self.set_log_ss.create_log_note_failed(key, 'Master Pricelist', message, None)
+
+    def transfer_pricelist_fast(self, date_from, date_to, modul='Master Pricelist'):
+        """Sync pricelist MC -> 1 store.
+        - Header (nama, mata uang, kode) hanya untuk pricelist yang berubah / belum ada di store.
+        - Baris harga dikirim PER BARIS: hanya baris yang belum ada di index_store store ini
+          (baris baru + baris lama yang ditutup API), bukan seluruh isi pricelist.
+        - Produk / kategori / baris di store dicari hanya untuk data yang dibutuhkan (per batch).
+        - Create per batch, update dikelompokkan per nilai yang sama, baris yang sama persis dilewati.
+        """
+        src, tgt = self.source_client, self.target_client
+        try:
+            self.get_master_conf()
+            sid = getattr(self, 'current_store_id', None)
+            ss_ids = set(getattr(self, 'ss_store_ids', None) or [])
+
+            tgt_pl_meta = self._rpc(tgt, 'product.pricelist', 'fields_get', [['id_mc', 'vit_code']],
+                                    {'attributes': ['type']}) or {}
+            tgt_item_meta = self._rpc(tgt, 'product.pricelist.item', 'fields_get',
+                                      [['id_mc'] + self.PRICELIST_LINE_FIELDS], {'attributes': ['type']}) or {}
+            pl_idmc_int = tgt_pl_meta.get('id_mc', {}).get('type') == 'integer'
+            item_idmc_int = tgt_item_meta.get('id_mc', {}).get('type') == 'integer'
+            line_fields = [f for f in self.PRICELIST_LINE_FIELDS if f in tgt_item_meta]
+
+            def idmc_value(mc_id, as_int):
+                return mc_id if as_int else str(mc_id)
+
+            # ---------------- Pricelist di store (tabel kecil, baca sekali) ----------------
+            tgt_pricelists = self._rpc(tgt, 'product.pricelist', 'search_read', [[]],
+                                       {'fields': ['id', 'name'] + (['id_mc'] if 'id_mc' in tgt_pl_meta else []),
+                                        'context': {'active_test': False}})
+            tgt_pl_by_idmc = {str(p['id_mc']): p['id'] for p in tgt_pricelists if p.get('id_mc')}
+            tgt_pl_by_name = {}
+            for p in tgt_pricelists:
+                tgt_pl_by_name.setdefault(p['name'], p['id'])
+
+            pl_map = {}           # id pricelist MC -> id pricelist store
+            mc_pl_names = {}      # id pricelist MC -> nama
+
+            def resolve_pricelists(mc_ids):
+                missing = [i for i in mc_ids if i not in pl_map]
+                if not missing:
+                    return
+                for p in self._rpc(src, 'product.pricelist', 'read', [missing, ['name']]):
+                    mc_pl_names[p['id']] = p['name']
+                    tgt_id = tgt_pl_by_idmc.get(str(p['id'])) or tgt_pl_by_name.get(p['name'])
+                    if tgt_id:
+                        pl_map[p['id']] = tgt_id
+
+            # ---------------- 1. HEADER ----------------
+            src_hdr_fields = ['name', 'currency_id'] + (['vit_code'] if 'vit_code' in tgt_pl_meta else [])
+            headers = self._rpc(src, 'product.pricelist', 'search_read',
+                                [self._sync_domain('product.pricelist', date_from, date_to)],
+                                {'fields': src_hdr_fields})
+            if headers:
+                currency_names = list({h['currency_id'][1] for h in headers if h.get('currency_id')})
+                tgt_currency = {c['name']: c['id'] for c in self._rpc(
+                    tgt, 'res.currency', 'search_read', [[['name', 'in', currency_names]]],
+                    {'fields': ['id', 'name'], 'context': {'active_test': False}})}
+
+                synced_headers = []
+                for h in headers:
+                    vals = {'name': h['name']}
+                    if 'id_mc' in tgt_pl_meta:
+                        vals['id_mc'] = idmc_value(h['id'], pl_idmc_int)
+                    if h.get('currency_id') and tgt_currency.get(h['currency_id'][1]):
+                        vals['currency_id'] = tgt_currency[h['currency_id'][1]]
+                    if 'vit_code' in tgt_pl_meta:
+                        vals['vit_code'] = h.get('vit_code') or False
+                    try:
+                        tgt_id = tgt_pl_by_idmc.get(str(h['id'])) or tgt_pl_by_name.get(h['name'])
+                        if tgt_id:
+                            self._rpc(tgt, 'product.pricelist', 'write', [[tgt_id], vals])
+                        else:
+                            tgt_id = self._rpc(tgt, 'product.pricelist', 'create', [vals])
+                            tgt_pl_by_name[h['name']] = tgt_id
+                        tgt_pl_by_idmc[str(h['id'])] = tgt_id
+                        pl_map[h['id']] = tgt_id
+                        synced_headers.append(h['id'])
+                    except Exception as e:
+                        self._log_pricelist_failed(h['name'], f"Gagal sync header pricelist {h['name']}: {e}")
+                if synced_headers:
+                    self.update_indexstore_source('product.pricelist', synced_headers, sid)
+                    self.mark_integrated_if_complete('product.pricelist', synced_headers)
+                print(f"Pricelist header ke {tgt.server_name}: {len(synced_headers)}/{len(headers)}")
+
+            # ---------------- 2. BARIS HARGA ----------------
+            item_model = 'product.pricelist.item'
+            use_index = bool(sid) and self._has_index_store(item_model)
+
+            # Baris yang ditutup API master_pricelist ditandai is_updated = True (lewat SQL,
+            # index_store-nya tidak berubah). Ubah tanda itu menjadi "belum terkirim ke store
+            # mana pun" (index_store dikosongkan), lalu is_updated dimatikan supaya tidak
+            # diproses ulang. Setelah itu baris ini ikut terpilih untuk SEMUA store.
+            if use_index:
+                closed_ids = self._rpc(src, item_model, 'search', [[['is_updated', '=', True]]])
+                for start in range(0, len(closed_ids), self.PRICELIST_READ_CHUNK):
+                    self._rpc(src, item_model, 'write',
+                              [closed_ids[start:start + self.PRICELIST_READ_CHUNK],
+                               {'index_store': [(5, 0, 0)], 'is_updated': False, 'is_integrated': False}])
+                if closed_ids:
+                    print(f"{len(closed_ids)} baris harga yang ditutup ditandai untuk dikirim ulang ke semua store")
+
+            line_domain = ([['index_store', 'not in', [sid]]] if use_index
+                           else ['|', ['is_integrated', '=', False], ['is_updated', '=', True]])
+            line_ids = self._rpc(src, item_model, 'search', [line_domain], {'order': 'id'})
+            print(f"Baris harga yang perlu dikirim ke {tgt.server_name}: {len(line_ids)}")
+
+            total_created = total_updated = total_same = total_failed = 0
+            for start in range(0, len(line_ids), self.PRICELIST_READ_CHUNK):
+                chunk_ids = line_ids[start:start + self.PRICELIST_READ_CHUNK]
+                lines = self._rpc(src, item_model, 'read', [chunk_ids, line_fields])
+                created, updated, same, failed = self._sync_pricelist_line_chunk(
+                    lines, line_fields, pl_map, resolve_pricelists, mc_pl_names, item_idmc_int)
+                total_created += created
+                total_updated += updated
+                total_same += same
+                total_failed += failed
+
+                synced_ids = [l['id'] for l in lines if l['id'] not in self._pricelist_failed_ids]
+                if synced_ids:
+                    if use_index:
+                        self._rpc(src, item_model, 'write', [synced_ids, {'index_store': [(4, sid)]}])
+                        # selesai di semua store -> is_integrated True, is_updated False
+                        done_ids = [r['id'] for r in self._rpc(src, item_model, 'read', [synced_ids, ['index_store']])
+                                    if ss_ids and ss_ids.issubset(set(r.get('index_store') or []))]
+                        if done_ids:
+                            self._rpc(src, item_model, 'write', [done_ids, {'is_integrated': True, 'is_updated': False}])
+                    else:
+                        self._rpc(src, item_model, 'write', [synced_ids, {'is_integrated': True, 'is_updated': False}])
+
+            print(f"Baris harga ke {tgt.server_name}: {total_created} dibuat, {total_updated} diupdate, "
+                  f"{total_same} sudah sama, {total_failed} gagal")
+        except Exception as e:
+            self._log_pricelist_failed(f"Exception - product.pricelist",
+                                       f"Sync pricelist ke {tgt.server_name} berhenti: {e}")
+
+    def _sync_pricelist_line_chunk(self, lines, line_fields, pl_map, resolve_pricelists, mc_pl_names, item_idmc_int):
+        """Proses 1 batch baris harga MC. Return (created, updated, same, failed).
+        ID baris yang gagal disimpan di self._pricelist_failed_ids (tidak ditandai terkirim)."""
+        src, tgt = self.source_client, self.target_client
+        self._pricelist_failed_ids = set()
+        m2o = self._m2o_id
+
+        # --- pricelist tujuan ---
+        resolve_pricelists(list({m2o(l['pricelist_id']) for l in lines if l.get('pricelist_id')}))
+
+        # --- kode produk / kategori di MC (hanya untuk batch ini) ---
+        tmpl_ids = list({m2o(l.get('product_tmpl_id')) for l in lines if l.get('product_tmpl_id')})
+        prod_ids = list({m2o(l.get('product_id')) for l in lines if l.get('product_id')})
+        categ_ids = list({m2o(l.get('categ_id')) for l in lines if l.get('categ_id')})
+        tmpl_code = {r['id']: r['default_code'] for r in
+                     (self._rpc(src, 'product.template', 'read', [tmpl_ids, ['default_code']]) if tmpl_ids else [])}
+        prod_code = {r['id']: r['default_code'] for r in
+                     (self._rpc(src, 'product.product', 'read', [prod_ids, ['default_code']]) if prod_ids else [])}
+        categ_name = {r['id']: r['complete_name'] for r in
+                      (self._rpc(src, 'product.category', 'read', [categ_ids, ['complete_name']]) if categ_ids else [])}
+
+        # --- padanannya di store (hanya kode yang dibutuhkan) ---
+        ctx = {'active_test': False}
+        codes_t = [c for c in set(tmpl_code.values()) if c]
+        codes_p = [c for c in set(prod_code.values()) if c]
+        names_c = [c for c in set(categ_name.values()) if c]
+        tgt_tmpl = {r['default_code']: r['id'] for r in (self._rpc(
+            tgt, 'product.template', 'search_read', [[['default_code', 'in', codes_t]]],
+            {'fields': ['id', 'default_code'], 'context': ctx}) if codes_t else [])}
+        tgt_prod = {r['default_code']: r['id'] for r in (self._rpc(
+            tgt, 'product.product', 'search_read', [[['default_code', 'in', codes_p]]],
+            {'fields': ['id', 'default_code'], 'context': ctx}) if codes_p else [])}
+        tgt_categ = {r['complete_name']: r['id'] for r in (self._rpc(
+            tgt, 'product.category', 'search_read', [[['complete_name', 'in', names_c]]],
+            {'fields': ['id', 'complete_name']}) if names_c else [])}
+
+        # --- baris yang sudah ada di store (lewat id_mc) ---
+        idmc_values = [(l['id'] if item_idmc_int else str(l['id'])) for l in lines]
+        existing = {}
+        for r in self._rpc(tgt, 'product.pricelist.item', 'search_read', [[['id_mc', 'in', idmc_values]]],
+                           {'fields': ['id', 'id_mc'] + line_fields, 'context': ctx}):
+            existing.setdefault(str(r['id_mc']), r)
+
+        def norm(value):
+            if isinstance(value, list):          # many2one dari read -> id
+                return value[0] if value else False
+            if isinstance(value, float):
+                return round(value, 6)
+            return value or False
+
+        to_create, to_update, same = [], {}, 0
+        line_by_create_index = []
+        for l in lines:
+            mc_pl = m2o(l.get('pricelist_id'))
+            tgt_pl = pl_map.get(mc_pl)
+            if not tgt_pl:
+                self._pricelist_failed_ids.add(l['id'])
+                self._log_pricelist_failed(mc_pl_names.get(mc_pl, f"Pricelist {mc_pl}"),
+                                           f"Pricelist '{mc_pl_names.get(mc_pl, mc_pl)}' belum ada di {tgt.server_name}; "
+                                           f"baris harga belum bisa dikirim.")
+                continue
+
+            vals = {'pricelist_id': tgt_pl,
+                    'id_mc': l['id'] if item_idmc_int else str(l['id'])}
+            missing = []
+            for f in line_fields:
+                if f in ('pricelist_id', 'product_tmpl_id', 'product_id', 'categ_id'):
+                    continue
+                vals[f] = l.get(f) if l.get(f) is not None else False
+            if 'product_tmpl_id' in line_fields:
+                code = tmpl_code.get(m2o(l.get('product_tmpl_id'))) if l.get('product_tmpl_id') else None
+                vals['product_tmpl_id'] = tgt_tmpl.get(code, False) if code else False
+                if l.get('product_tmpl_id') and not vals['product_tmpl_id']:
+                    missing.append(f"produk {code or l['product_tmpl_id'][1]}")
+            if 'product_id' in line_fields:
+                code = prod_code.get(m2o(l.get('product_id'))) if l.get('product_id') else None
+                vals['product_id'] = tgt_prod.get(code, False) if code else False
+                if l.get('product_id') and not vals['product_id']:
+                    missing.append(f"varian {code or l['product_id'][1]}")
+            if 'categ_id' in line_fields:
+                name = categ_name.get(m2o(l.get('categ_id'))) if l.get('categ_id') else None
+                vals['categ_id'] = tgt_categ.get(name, False) if name else False
+                if l.get('categ_id') and not vals['categ_id']:
+                    missing.append(f"kategori {name}")
+            if missing:
+                self._pricelist_failed_ids.add(l['id'])
+                self._log_pricelist_failed(f"Pricelist item {l['id']}",
+                                           f"Baris harga {l['id']} ({mc_pl_names.get(mc_pl, mc_pl)}) tidak dikirim ke "
+                                           f"{tgt.server_name}: {', '.join(missing)} belum ada di store.")
+                continue
+
+            current = existing.get(str(l['id']))
+            if not current:
+                to_create.append(vals)
+                line_by_create_index.append(l['id'])
+                continue
+            diff = {k: v for k, v in vals.items() if k != 'id_mc' and norm(current.get(k)) != norm(v)}
+            if not diff:
+                same += 1
+                continue
+            key = tuple(sorted((k, str(v)) for k, v in diff.items()))
+            to_update.setdefault(key, (diff, []))[1].append((current['id'], l['id']))
+
+        # --- CREATE per batch (fallback satu-per-satu kalau batch gagal) ---
+        created = 0
+        for i in range(0, len(to_create), self.PRICELIST_WRITE_CHUNK):
+            batch = to_create[i:i + self.PRICELIST_WRITE_CHUNK]
+            batch_ids = line_by_create_index[i:i + self.PRICELIST_WRITE_CHUNK]
+            try:
+                self._rpc(tgt, 'product.pricelist.item', 'create', [batch])
+                created += len(batch)
+            except Exception:
+                for vals, mc_id in zip(batch, batch_ids):
+                    try:
+                        self._rpc(tgt, 'product.pricelist.item', 'create', [vals])
+                        created += 1
+                    except Exception as e:
+                        self._pricelist_failed_ids.add(mc_id)
+                        self._log_pricelist_failed(f"Pricelist item {mc_id}",
+                                                   f"Gagal membuat baris harga {mc_id} di {tgt.server_name}: {e}")
+
+        # --- UPDATE dikelompokkan per nilai yang sama ---
+        updated = 0
+        for diff, pairs in to_update.values():
+            tgt_ids = [p[0] for p in pairs]
+            try:
+                self._rpc(tgt, 'product.pricelist.item', 'write', [tgt_ids, diff])
+                updated += len(tgt_ids)
+            except Exception:
+                for tgt_id, mc_id in pairs:
+                    try:
+                        self._rpc(tgt, 'product.pricelist.item', 'write', [[tgt_id], diff])
+                        updated += 1
+                    except Exception as e:
+                        self._pricelist_failed_ids.add(mc_id)
+                        self._log_pricelist_failed(f"Pricelist item {mc_id}",
+                                                   f"Gagal update baris harga {mc_id} di {tgt.server_name}: {e}")
+
+        return created, updated, same, len(self._pricelist_failed_ids)
+
     def get_index_store_data(self, model, id, len_master_store):
         try:
             index_store_data = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,

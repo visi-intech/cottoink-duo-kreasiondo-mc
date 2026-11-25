@@ -330,7 +330,8 @@ class SettingConfig(models.Model):
 
         for ss_client in ss_clients:
             integrator_master = DataIntegrator(mc_client, ss_client)
-            integrator_master.transfer_data('product.pricelist', ['name', 'currency_id', 'item_ids', 'create_date', 'write_date'], 'Master Pricelist', date_from, date_to)
+            # Sync cepat: per baris harga yang berubah, batch (pengganti transfer_data pricelist)
+            integrator_master.transfer_pricelist_fast(date_from, date_to)
 
     def create_master_operation_type(self, mc, ss, datefrom, dateto):
         if mc and ss:
