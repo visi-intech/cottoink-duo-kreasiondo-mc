@@ -629,6 +629,18 @@ def _payload_val(data, field):
     return None, None
 
 
+def _item_error(rec_id, product_code, prefix, exc):
+    """Error entry untuk kegagalan ORM; ditandai error_type 'uom' kalau
+    penyebabnya Unit of Measure (mis. ganti UoM produk yang sudah punya transaksi)."""
+    message = str(exc)
+    entry = {'id': rec_id, 'product_code': product_code, 'message': f"{prefix}: {message}"}
+    lowered = message.lower()
+    if 'unit of measure' in lowered or 'uom' in lowered or 'satuan' in lowered:
+        entry['error_type'] = 'uom'
+        entry['field'] = 'uom_name'
+    return entry
+
+
 def _advisory_lock(cr, key):
     """Transaction-level advisory lock (hash dari key), otomatis lepas saat
     commit/rollback. Mengurangi konflik kalau beberapa request paralel
@@ -811,8 +823,7 @@ class POSTMasterItem(http.Controller):
                             new_items.append({'id': rec.id, 'product_code': rec.default_code,
                                               'name': rec.name, 'action': 'created'})
                         except Exception as single_err:
-                            errors.append({'id': -1, 'product_code': code,
-                                           'message': f"Create failed: {single_err}"})
+                            errors.append(_item_error(-1, code, "Create failed", single_err))
                 _commit_with_retry(cr, context=f"item_create_{len(created) + len(new_items)}")
                 created.extend(new_items)
 
@@ -861,30 +872,50 @@ class POSTMasterItem(http.Controller):
                     if lookup_error:
                         continue
 
-                    # UoM -- wajib untuk produk baru; untuk update opsional
-                    # (kalau dikirim tetap harus valid)
+                    # UoM -- wajib untuk produk baru (kecuali service); untuk update opsional
+                    # (kalau dikirim tetap harus valid). Service tanpa UoM -> default Odoo (Units).
                     uom_name = data.get('uom_name')
                     uom_po_name = data.get('uom_po_name')
-                    if is_new:
+                    is_service = data.get('product_type') == 'service'
+                    uom_errors = []   # semua masalah UoM item ini dilaporkan sekaligus
+
+                    def uom_error(field, value, message):
+                        uom_errors.append({
+                            'id': existing_id or -1, 'product_code': product_code,
+                            'error_type': 'uom', 'field': field, 'value': value,
+                            'message': message,
+                        })
+
+                    if is_new and not is_service:
+                        product_type = data.get('product_type') or 'product'
                         if not uom_name:
-                            errors.append({'id': -1, 'product_code': product_code, 'message': "uom_name missing"})
-                            continue
+                            uom_error('uom_name', uom_name,
+                                      f"uom_name wajib diisi untuk produk baru dengan product_type "
+                                      f"'{product_type}' (hanya 'service' yang boleh kosong).")
                         if not uom_po_name:
-                            errors.append({'id': -1, 'product_code': product_code, 'message': "uom_po_name missing"})
-                            continue
+                            uom_error('uom_po_name', uom_po_name,
+                                      f"uom_po_name wajib diisi untuk produk baru dengan product_type "
+                                      f"'{product_type}' (hanya 'service' yang boleh kosong).")
                     uom = uom_map.get(uom_name) if uom_name else None
                     if uom_name and not uom:
-                        errors.append({'id': existing_id or -1, 'product_code': product_code,
-                                       'message': f"UoM '{uom_name}' not found."})
-                        continue
+                        uom_error('uom_name', uom_name,
+                                  f"UoM '{uom_name}' tidak ditemukan di MC (nama harus sama persis).")
                     uom_po = uom_map.get(uom_po_name) if uom_po_name else None
                     if uom_po_name and not uom_po:
-                        errors.append({'id': existing_id or -1, 'product_code': product_code,
-                                       'message': f"Purchase UoM '{uom_po_name}' not found."})
+                        uom_error('uom_po_name', uom_po_name,
+                                  f"Purchase UoM '{uom_po_name}' tidak ditemukan di MC (nama harus sama persis).")
+                    if uom_errors:
+                        errors.extend(uom_errors)
                         continue
+                    if is_new and is_service:
+                        # Service hanya isi salah satu UoM -> samakan keduanya
+                        uom = uom or uom_po
+                        uom_po = uom_po or uom
                     if uom and uom_po and uom[1] != uom_po[1]:   # kategori UoM wajib sama
-                        errors.append({'id': existing_id or -1, 'product_code': product_code,
-                                       'message': "Default UoM and Purchase UoM must match."})
+                        uom_error('uom_po_name', uom_po_name,
+                                  f"uom_name '{uom_name}' dan uom_po_name '{uom_po_name}' "
+                                  f"harus dari kategori UoM yang sama.")
+                        errors.extend(uom_errors)
                         continue
 
                     if is_new and not data.get('product_name'):
@@ -958,8 +989,7 @@ class POSTMasterItem(http.Controller):
                         if update_counter % BATCH_CREATE_SIZE == 0:
                             _commit_with_retry(cr, context=f"item_update_{update_counter}")
                     except Exception as upd_err:
-                        errors.append({'id': existing_id, 'product_code': product_code,
-                                       'message': f"Update failed: {upd_err}"})
+                        errors.append(_item_error(existing_id, product_code, "Update failed", upd_err))
 
                 except Exception as e:
                     errors.append({'id': -1, 'product_code': data.get('product_code'), 'message': str(e)})
