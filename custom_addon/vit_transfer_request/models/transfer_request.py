@@ -101,6 +101,77 @@ class TransferRequest(models.Model):
             if record.location_id and record.location_id == record.location_dest_id:
                 raise ValidationError(_("Source Location dan Destination Location tidak boleh sama."))
 
+    # ------------------------------------------------------------------
+    # Blocking stock: qty ITR tidak boleh melebihi stock available gudang
+    # available = on hand source location - sisa qty ITR lain yang masih In Progress
+    # ------------------------------------------------------------------
+    BLOCKING_STATES = ('draft', 'in_progress')   # state ITR yang dicek saat dibuat/diubah/confirm
+    RESERVING_STATES = ('in_progress',)          # state ITR lain yang dianggap memakai stock
+
+    @api.model
+    def _get_reserved_qty(self, location, products, exclude_ids=()):
+        """Sisa qty (UoM produk) ITR lain In Progress di source location yang sama.
+        Return {product_id: qty}."""
+        if not products:
+            return {}
+        domain = [
+            ('request_id.state', 'in', self.RESERVING_STATES),
+            ('request_id.location_id', '=', location.id),
+            ('product_id', 'in', products.ids),
+            ('qty_remaining', '>', 0),
+        ]
+        if exclude_ids:
+            domain.append(('request_id', 'not in', list(exclude_ids)))
+        reserved = {}
+        for line in self.env['transfer.request.line'].sudo().search(domain):
+            reserved[line.product_id.id] = reserved.get(line.product_id.id, 0.0) + \
+                line._qty_in_product_uom(line.qty_remaining)
+        return reserved
+
+    def _check_stock_available(self):
+        precision = self.env['decimal.precision'].precision_get('Product Unit of Measure')
+        records = self.filtered(lambda r: r.state in self.BLOCKING_STATES and r.location_id and r.line_ids)
+        if not records:
+            return
+        # Kunci per source location supaya 2 ITR yang dibuat bersamaan tidak sama-sama lolos
+        for location_id in sorted(set(records.mapped('location_id').ids)):
+            self.env.cr.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                                (f"transfer.request.location:{location_id}",))
+
+        for record in records:
+            errors = []
+            # Hanya produk storable yang punya stock on hand
+            lines = record.line_ids.filtered(lambda l: l.product_id.type == 'product')
+            requested = {}
+            for line in lines:
+                requested[line.product_id] = requested.get(line.product_id, 0.0) + \
+                    line._qty_in_product_uom(line.qty_remaining)
+            if not requested:
+                continue
+            products = self.env['product.product'].browse([p.id for p in requested])
+            reserved = self._get_reserved_qty(record.location_id, products, exclude_ids=record.ids)
+            on_hand = {p.id: p.qty_available for p in products.with_context(
+                location=record.location_id.id, compute_child=True)}
+            for product, qty in requested.items():
+                available = on_hand.get(product.id, 0.0) - reserved.get(product.id, 0.0)
+                if float_compare(qty, available, precision_digits=precision) > 0:
+                    errors.append(_(
+                        "- %(product)s: diminta %(qty)s %(uom)s, stock available %(available)s "
+                        "(on hand %(on_hand)s, dipakai ITR lain %(reserved)s)",
+                        product=product.display_name, qty=qty, uom=product.uom_id.name,
+                        available=max(available, 0.0), on_hand=on_hand.get(product.id, 0.0),
+                        reserved=reserved.get(product.id, 0.0)))
+            if errors:
+                raise ValidationError(_(
+                    "Transfer Request %(doc)s tidak bisa disimpan/confirm karena qty melebihi "
+                    "stock available di %(loc)s:\n%(lines)s",
+                    doc=record.doc_num or _('baru'), loc=record.location_id.display_name,
+                    lines="\n".join(errors)))
+
+    @api.constrains('location_id', 'state', 'line_ids')
+    def _constrains_stock_available(self):
+        self._check_stock_available()
+
     @api.onchange('warehouse_id')
     def _onchange_warehouse_id(self):
         """Isi otomatis source location dari stock location warehouse."""
@@ -139,6 +210,7 @@ class TransferRequest(models.Model):
             if not record.line_ids:
                 raise UserError(_("Transfer Request %s belum punya item.", record.doc_num))
             record.state = 'in_progress'
+        self._check_stock_available()
 
     def action_cancel(self):
         for record in self:
@@ -293,6 +365,34 @@ class TransferRequestLine(models.Model):
             transferred = sum(done_moves.mapped('quantity'))
             line.qty_transferred = transferred
             line.qty_remaining = max(line.product_uom_qty - transferred, 0.0)
+
+    qty_available = fields.Float(string='Stock Available', compute='_compute_qty_available',
+                                 digits=(16, 3),
+                                 help='On hand di source location dikurangi sisa qty ITR lain yang '
+                                      'masih In Progress (dalam UoM produk).')
+
+    def _qty_in_product_uom(self, qty):
+        self.ensure_one()
+        if self.product_uom_id and self.product_id and self.product_uom_id != self.product_id.uom_id:
+            return self.product_uom_id._compute_quantity(qty, self.product_id.uom_id)
+        return qty
+
+    @api.depends('product_id', 'request_id.location_id')
+    def _compute_qty_available(self):
+        for line in self:
+            location = line.request_id.location_id
+            if not line.product_id or not location or line.product_id.type != 'product':
+                line.qty_available = 0.0
+                continue
+            on_hand = line.product_id.with_context(location=location.id, compute_child=True).qty_available
+            exclude = [line.request_id._origin.id] if line.request_id._origin.id else []
+            reserved = self.env['transfer.request']._get_reserved_qty(
+                location, line.product_id, exclude_ids=exclude)
+            line.qty_available = on_hand - reserved.get(line.product_id.id, 0.0)
+
+    @api.constrains('product_id', 'product_uom_qty', 'product_uom_id')
+    def _constrains_stock_available(self):
+        self.mapped('request_id')._check_stock_available()
 
     @api.constrains('product_uom_qty')
     def _check_product_uom_qty(self):
