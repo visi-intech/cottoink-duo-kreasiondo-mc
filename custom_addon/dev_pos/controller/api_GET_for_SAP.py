@@ -3,6 +3,7 @@ import werkzeug.exceptions
 from odoo.exceptions import ValidationError
 from odoo import http, _, fields
 from odoo.http import request
+from odoo.tools import html2plaintext
 import pytz
 import re
 import decimal
@@ -3827,6 +3828,7 @@ class TsOutAPI(http.Controller):
                     'create_date': str(create_date_jakarta),
                     'scheduled_date': str(order.scheduled_date),
                     'date_done': str(order.date_done),
+                    'note': html2plaintext(order.note or '').strip(),
                     'state': order.state
                 }
                 data_transit_out.append(order_data)
@@ -3989,6 +3991,7 @@ class TsInAPI(http.Controller):
                     'create_date': str(create_date_jakarta),
                     'scheduled_date': str(order.scheduled_date),
                     'date_done': str(order.date_done),
+                    'note': html2plaintext(order.note or '').strip(),
                     'state': order.state
                 }
                 data_transit_in.append(order_data)

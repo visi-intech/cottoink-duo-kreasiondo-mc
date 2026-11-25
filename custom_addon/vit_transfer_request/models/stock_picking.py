@@ -1,7 +1,8 @@
 import logging
+import re
 
 from odoo import models, fields, api, _
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tools import float_compare
 
 _logger = logging.getLogger(__name__)
@@ -66,6 +67,59 @@ class StockPicking(models.Model):
     def _compute_vit_is_ts_out(self):
         for picking in self:
             picking.vit_is_ts_out = self._vit_type_matches(picking.picking_type_id, TS_OUT_NAME)
+
+    # ------------------------------------------------------------------
+    # Penomoran TS Out / TS In: TSOT/<kode WH>/<tahun>/00001 dan TSIN/<kode WH>/<tahun>/00001.
+    # Di MC kode WH diambil dari Source Warehouse. Dokumen hasil sync dari Store sudah membawa
+    # nomornya sendiri (name terisi), jadi tidak diberi nomor baru di sini.
+    # ------------------------------------------------------------------
+    @api.model
+    def _vit_numbering_warehouse(self, vals, picking_type):
+        warehouse = self.env['stock.warehouse']
+        if vals.get('vit_warehouse_id'):
+            warehouse = warehouse.browse(vals['vit_warehouse_id'])
+        if not warehouse and vals.get('location_id'):
+            warehouse = self.env['stock.location'].browse(vals['location_id']).warehouse_id
+        return warehouse or picking_type.warehouse_id
+
+    @api.model
+    def _vit_next_ts_name(self, prefix, code, batch_counter):
+        """Nomor berikutnya = nomor terbesar yang sudah dipakai dokumen dengan prefix yang sama + 1
+        (termasuk dokumen hasil sync). Advisory lock menyerialkan pembuatan nomor supaya dua user
+        tidak mendapat nomor yang sama."""
+        year = fields.Date.context_today(self).year
+        base = '%s/%s/%s/' % (prefix, code, year)
+        if base not in batch_counter:
+            self.env.cr.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (base,))
+            like = base.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+            pattern = '^%s[0-9]+$' % re.escape(base)
+            self.env.cr.execute(
+                "SELECT max(substring(name from '([0-9]+)$')::bigint) FROM stock_picking "
+                "WHERE name LIKE %s AND name ~ %s", (like, pattern))
+            batch_counter[base] = self.env.cr.fetchone()[0] or 0
+        batch_counter[base] += 1
+        return '%s%05d' % (base, batch_counter[base])
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        batch_counter = {}
+        for vals in vals_list:
+            if vals.get('name') not in (None, False, '', '/'):
+                continue
+            type_id = vals.get('picking_type_id') or self.default_get(['picking_type_id']).get('picking_type_id')
+            if not type_id:
+                continue
+            picking_type = self.env['stock.picking.type'].browse(type_id)
+            if self._vit_type_matches(picking_type, TS_OUT_NAME):
+                prefix = 'TSOT'
+            elif self._vit_type_matches(picking_type, TS_IN_NAME):
+                prefix = 'TSIN'
+            else:
+                continue
+            code = (self._vit_numbering_warehouse(vals, picking_type).code or '').strip()
+            if code:  # tanpa kode WH: biarkan penomoran bawaan Odoo
+                vals['name'] = self._vit_next_ts_name(prefix, code, batch_counter)
+        return super().create(vals_list)
 
     @api.model
     def default_get(self, fields_list):
@@ -229,6 +283,32 @@ class StockPicking(models.Model):
                 picking.message_post(body=_("TS In %s dibuat otomatis setelah TS Out ini Done.", ts_in.name))
         return res
 
+    def _vit_check_ts_in_equals_ts_out(self):
+        """Block TS In: qty TS In harus sama dengan qty TS Out (tidak boleh kurang, tidak boleh lebih).
+        Hanya untuk move TS In yang terhubung ke move TS Out (TS In yang dibuat dari TS Out)."""
+        for picking in self.filtered('vit_is_ts_in'):
+            problems = []
+            for move in picking.move_ids.filtered(lambda m: m.state != 'cancel' and m.vit_ts_out_move_id):
+                out = move.vit_ts_out_move_id
+                out_qty = out.product_uom._compute_quantity(out.quantity, move.product_uom)
+                rounding = move.product_uom.rounding
+                if (float_compare(move.quantity, out_qty, precision_rounding=rounding) != 0
+                        or float_compare(move.product_uom_qty, out_qty, precision_rounding=rounding) != 0):
+                    problems.append(_("- [%(code)s] %(name)s: TS In %(qty)s (demand %(demand)s), TS Out %(out)s",
+                                      code=move.product_id.default_code or '-', name=move.product_id.name,
+                                      qty=move.quantity, demand=move.product_uom_qty, out=out_qty))
+            if problems:
+                raise UserError(_("Tidak dapat memvalidasi %(doc)s.\n\nQty TS In harus sama dengan qty TS Out:\n%(lines)s",
+                                  doc=picking.name, lines='\n'.join(problems)))
+
+    def button_validate(self):
+        self._vit_check_ts_in_equals_ts_out()
+        # constraint di stock.move bisa tidak terpicu kalau qty berubah lewat move line
+        # (quantity adalah field compute), jadi dicek ulang tepat sebelum validasi.
+        self.move_ids._check_vit_not_over_transfer_request()
+        self.move_ids._check_vit_ts_in_not_over_ts_out()
+        return super().button_validate()
+
     def action_view_ts_in(self):
         self.ensure_one()
         self._check_ts_in_access()
@@ -259,3 +339,30 @@ class StockMove(models.Model):
         if requests:
             requests._update_fulfilment_state()
         return moves_done
+
+    @api.constrains('product_uom_qty', 'quantity', 'state', 'vit_transfer_request_line_id')
+    def _check_vit_not_over_transfer_request(self):
+        """TS Out boleh kurang dari Transfer Request, tetapi tidak boleh lebih."""
+        for line in self.filtered('vit_transfer_request_line_id').vit_transfer_request_line_id:
+            moves = line.move_ids.filtered(lambda m: m.state != 'cancel')
+            demand = sum(m.product_uom._compute_quantity(m.product_uom_qty, line.product_uom_id) for m in moves)
+            qty = sum(m.product_uom._compute_quantity(m.quantity, line.product_uom_id) for m in moves)
+            if float_compare(max(demand, qty), line.product_uom_qty,
+                             precision_rounding=line.product_uom_id.rounding) > 0:
+                raise ValidationError(_(
+                    "Qty Transfer Out untuk [%(code)s] %(name)s (%(qty)s) melebihi qty Transfer Request %(doc)s (%(req)s).",
+                    code=line.product_id.default_code or '-', name=line.product_id.name,
+                    qty=max(demand, qty), doc=line.request_id.doc_num, req=line.product_uom_qty))
+
+    @api.constrains('product_uom_qty', 'quantity', 'vit_ts_out_move_id')
+    def _check_vit_ts_in_not_over_ts_out(self):
+        """Qty TS In tidak boleh melebihi qty TS Out yang menjadi dasarnya."""
+        for out in self.filtered('vit_ts_out_move_id').vit_ts_out_move_id:
+            ins = self.env['stock.move'].search([('vit_ts_out_move_id', '=', out.id), ('state', '!=', 'cancel')])
+            demand = sum(m.product_uom._compute_quantity(m.product_uom_qty, out.product_uom) for m in ins)
+            qty = sum(m.product_uom._compute_quantity(m.quantity, out.product_uom) for m in ins)
+            if float_compare(max(demand, qty), out.quantity, precision_rounding=out.product_uom.rounding) > 0:
+                raise ValidationError(_(
+                    "Qty TS In untuk [%(code)s] %(name)s (%(qty)s) melebihi qty TS Out %(doc)s (%(out)s).",
+                    code=out.product_id.default_code or '-', name=out.product_id.name,
+                    qty=max(demand, qty), doc=out.picking_id.name, out=out.quantity))
