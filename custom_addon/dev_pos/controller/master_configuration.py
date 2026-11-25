@@ -712,7 +712,7 @@ class SettingConfig(models.Model):
         for ss_client in ss_clients:
             integrator_transaksi = DataTransaksi(ss_client, mc_client)
             integrator_transaksi.transfer_pos_order_invoice_ss_to_mc_session_closed_before_inv('pos.order', ['id', 'name', 'date_order', 'session_id', 'user_id', 'partner_id', 'pos_reference', 'vit_trxid', 'tracking_number', 'pricelist_id', 'employee_id', 'margin', 'amount_tax', 'amount_total', 'amount_paid', 'amount_return', 'state', 'lines', 'payment_ids'], 'Transaksi PoS Order Invoice', date_from, date_to)
-            integrator_transaksi.update_session_status('pos.session', ['name', 'state', 'start_at', 'stop_at', 'config_id', 'cash_register_balance_start', 'cash_register_balance_end_real'], 'Update Session PoS Order', date_from, date_to)
+            integrator_transaksi.update_session_status('pos.session', ['name', 'state', 'start_at', 'stop_at', 'config_id'], 'Update Session PoS Order', date_from, date_to)
             integrator_transaksi.transfer_pos_order_session('pos.session', ['name', 'config_id', 'user_id', 'start_at', 'stop_at', 'state'], 'Master Session PoS Order Invoice', date_from, date_to)
 
     def create_pos_order_utility(self, mc, ss, datefrom, dateto):
@@ -736,8 +736,8 @@ class SettingConfig(models.Model):
         for ss_client in ss_clients:
             integrator_transaksi = DataTransaksi(ss_client, mc_client)
             integrator_transaksi.transfer_pos_order_invoice_ss_to_mc('pos.order', ['id', 'name', 'date_order', 'session_id', 'user_id', 'partner_id', 'pos_reference', 'vit_trxid', 'tracking_number', 'pricelist_id', 'employee_id', 'margin', 'amount_tax', 'amount_total', 'amount_paid', 'amount_return', 'state', 'lines', 'payment_ids'], 'Transaksi PoS Order Invoice', date_from, date_to)
-            integrator_transaksi.update_session_status('pos.ses?sion', ['name', 'id','state', 'is_store', 'start_at', 'stop_at', 'cash_register_balance_start', 'cash_register_balance_end_real'], "Session Updated", date_from, date_to)
-            integrator_transaksi.transfer_pos_order_session('pos.session', ['name', 'config_id', 'is_store', 'user_id', 'start_at', 'stop_at', 'state'], 'Master Session PoS Order Invoice', date_from, date_to)
+            integrator_transaksi.update_session_status('pos.session', ['name', 'id', 'state', 'start_at', 'stop_at'], "Session Updated", date_from, date_to)
+            integrator_transaksi.transfer_pos_order_session('pos.session', ['name', 'config_id', 'user_id', 'start_at', 'stop_at', 'state'], 'Master Session PoS Order Invoice', date_from, date_to)
 
     def validate_GRPO(self, mc, ss, datefrom, dateto):
         if mc and ss:

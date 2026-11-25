@@ -28,6 +28,15 @@ def allowed_origin():
     return origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGIN
 
 
+def _stock_location_first(location, location_dest):
+    """Kembalikan (lokasi internal/Stock, lokasi lawan). Picking retur bergerak
+    Customers -> Stock; untuk API invoice urutannya tidak dibalik, jadi
+    location_id selalu lokasi internal (/Stock)."""
+    if location.usage != 'internal' and location_dest.usage == 'internal':
+        return location_dest, location
+    return location, location_dest
+
+
 def cors_response():
     """Helper untuk buat response kosong dengan header CORS lengkap"""
     response = request.make_response("", headers=[
@@ -245,27 +254,41 @@ class MasterCoupon(http.Controller):
             return response
 
 class MasterCouponPATCH(http.Controller):
-    # Preflight (OPTIONS) ditangani sendiri: CORS bawaan Odoo untuk route type='json'
-    # selalu menjawab "Access-Control-Allow-Methods: POST", sehingga browser menolak PATCH.
+    # Route type='http' TANPA parameter cors=: CORS bawaan Odoo (cors=...) otomatis menambah
+    # OPTIONS dan untuk type='json' selalu menjawab "Access-Control-Allow-Methods: POST",
+    # sehingga browser menolak PATCH. Preflight & header CORS ditangani sendiri di sini.
+    # Body request tetap sama ({"items": {...}}); response berupa JSON biasa
+    # (JS POS membaca `data.result || data`, jadi tetap kompatibel).
     @http.route(
         ['/api/master_coupon'],
         type='http',
         auth='none',
-        methods=['OPTIONS'],
+        methods=['PATCH', 'OPTIONS'],
         csrf=False,
     )
-    def update_master_coupon_preflight(self, **kwargs):
-        return cors_response()   # Allow-Methods: GET, POST, PATCH, OPTIONS
+    def update_master_coupon_http(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS':
+            return cors_response()   # Allow-Methods: GET, POST, PATCH, OPTIONS
 
-    @http.route(
-        ['/api/master_coupon'],
-        type='json',
-        auth='none',
-        methods=['PATCH'],
-        csrf=False,
-        cors="*"
-    )
-    def update_master_coupon(self, **kwargs):
+        try:
+            json_data = json.loads(request.httprequest.get_data(as_text=True) or '{}')
+            if isinstance(json_data, dict) and isinstance(json_data.get('params'), dict):
+                json_data = json_data['params']   # kompatibel kalau dikirim format JSON-RPC
+        except ValueError:
+            json_data = None
+
+        if not isinstance(json_data, dict):
+            result = {'status': 'Error', 'code': 400, 'message': 'Body harus JSON object.', 'updated': []}
+        else:
+            result = self.update_master_coupon(json_data)
+
+        response = request.make_json_response(result)
+        response.headers['Access-Control-Allow-Origin'] = allowed_origin()
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Vary'] = 'Origin'
+        return response
+
+    def update_master_coupon(self, json_data):
         """
         PATCH API untuk update coupon is_used (by code only)
         Expected input:
@@ -302,8 +325,7 @@ class MasterCouponPATCH(http.Controller):
                     'updated': []
                 }
 
-            # 🔄 Load JSON input
-            json_data = request.get_json_data()
+            # 🔄 JSON input (sudah di-parse oleh update_master_coupon_http)
             _logger.info(f"📥 PATCH Request received: {json_data}")
             
             items = json_data.get('items')
@@ -2379,10 +2401,12 @@ class InvoiceOrder(http.Controller):
                             ], limit=1)
 
                             if pickings:
-                                location_id = pickings.location_id.id
-                                location = pickings.location_id.complete_name
-                                location_dest_id = pickings.location_dest_id.id
-                                location_dest = pickings.location_dest_id.complete_name
+                                # Retur (Customers -> Stock) tidak dibalik: location_id selalu lokasi /Stock
+                                src, dest = _stock_location_first(pickings.location_id, pickings.location_dest_id)
+                                location_id = src.id
+                                location = src.complete_name
+                                location_dest_id = dest.id
+                                location_dest = dest.complete_name
                             elif invoicing.pos_order_ids:
                                 pos_order = invoicing.pos_order_ids[0]
                                 if hasattr(pos_order, 'vit_pos_store') and pos_order.vit_pos_store:
@@ -2403,8 +2427,10 @@ class InvoiceOrder(http.Controller):
                             ], limit=1)
                             
                             if pickings:
-                                location_id = pickings.location_id.id
-                                location_dest_id = pickings.location_dest_id.id
+                                # location_id selalu lokasi /Stock (picking retur tidak dibalik)
+                                src, dest = _stock_location_first(pickings.location_id, pickings.location_dest_id)
+                                location_id = src.id
+                                location_dest_id = dest.id
                                 _logger.info(f"Service line {line.id}: Found picking with location_id {location_id}")
                             
                             # Gunakan vit_pos_store untuk location name
