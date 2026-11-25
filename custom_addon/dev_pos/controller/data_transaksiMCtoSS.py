@@ -2433,6 +2433,8 @@ class DataTransaksiMCtoSS:
         try:
             fields = list(fields) + [f for f in self._existing_fields(self.source_client, model_name, self.TS_IN_EXTRA_FIELDS)
                                      if f not in fields]
+            if 'note' not in fields:
+                fields.append('note')
             store_fields = self._existing_fields(self.target_client, 'stock.picking', self.TS_IN_STORE_FIELDS)
             transaksi_ts_in = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                                 self.source_client.uid, self.source_client.password,
@@ -2601,6 +2603,10 @@ class DataTransaksiMCtoSS:
                     'location_dest_id': int(location_dest_id),
                     'targets': target_location,
                     'picking_type_id': int(picking_type_id),
+                    'note': record.get('note', False),
+                    # Nomor TS In di Store harus sama dengan MC (TSIN/<kode WH>/<tahun>/00001):
+                    # name dikirim apa adanya, penomoran Store tidak menimpanya.
+                    'name': record.get('name', False),
                     'move_ids_without_package': ts_in_inventory_line_ids,
                 }
 

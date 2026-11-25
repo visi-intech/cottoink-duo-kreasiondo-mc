@@ -3,6 +3,7 @@ import werkzeug.exceptions
 from odoo.exceptions import ValidationError
 from odoo import http, _, fields
 from odoo.http import request
+from odoo.tools import html2plaintext
 import pytz
 import re
 import decimal
@@ -13,15 +14,29 @@ import base64
 import logging
 _logger = logging.getLogger(__name__)
 
-ALLOWED_ORIGIN = "http://pos-store.visi-intech.com"
+ALLOWED_ORIGINS = [
+    "http://pos-store.visi-intech.com",
+    "http://172.16.186.3:8069",
+    "http://172.16.186.4:8069",
+]
+ALLOWED_ORIGIN = ALLOWED_ORIGINS[0]
+
+
+def allowed_origin():
+    """Header Access-Control-Allow-Origin hanya boleh 1 origin: kembalikan Origin
+    peminta kalau ada di ALLOWED_ORIGINS, selain itu origin default."""
+    origin = (request.httprequest.headers.get('Origin') or '').rstrip('/')
+    return origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGIN
+
 
 def cors_response():
     """Helper untuk buat response kosong dengan header CORS lengkap"""
     response = request.make_response("", headers=[
-        ("Access-Control-Allow-Origin", ALLOWED_ORIGIN),
+        ("Access-Control-Allow-Origin", allowed_origin()),
         ("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS"),
         ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
-        ("Access-Control-Allow-Credentials", "true")
+        ("Access-Control-Allow-Credentials", "true"),
+        ("Vary", "Origin"),
     ])
     response.status_code = 200
     return response
@@ -54,7 +69,7 @@ class GETMasterServer(http.Controller):
                     "total_pages": 0
                 }
                 response = request.make_json_response(response_data)
-                response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+                response.headers['Access-Control-Allow-Origin'] = allowed_origin()
                 return response
 
             domain = []
@@ -86,7 +101,7 @@ class GETMasterServer(http.Controller):
             }
             
             response = request.make_json_response(response_data)
-            response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+            response.headers['Access-Control-Allow-Origin'] = allowed_origin()
             return response
 
         except Exception as e:
@@ -97,7 +112,7 @@ class GETMasterServer(http.Controller):
                 "data": []
             }
             response = request.make_json_response(error_response, status=500)
-            response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+            response.headers['Access-Control-Allow-Origin'] = allowed_origin()
             return response
 
 class MasterCoupon(http.Controller):
@@ -130,7 +145,7 @@ class MasterCoupon(http.Controller):
                     "total_pages": 0
                 }
                 response = request.make_json_response(response_data)
-                response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+                response.headers['Access-Control-Allow-Origin'] = allowed_origin()
                 return response
 
             domain = []
@@ -179,7 +194,7 @@ class MasterCoupon(http.Controller):
                     "total_pages": 1
                 }
                 response = request.make_json_response(response_data)
-                response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+                response.headers['Access-Control-Allow-Origin'] = allowed_origin()
                 return response
             
             # Jika tidak filter by code, apply pagination
@@ -216,7 +231,7 @@ class MasterCoupon(http.Controller):
                 "total_pages": total_pages
             }
             response = request.make_json_response(response_data)
-            response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+            response.headers['Access-Control-Allow-Origin'] = allowed_origin()
             return response
 
         except Exception as e:
@@ -227,7 +242,7 @@ class MasterCoupon(http.Controller):
                 "data": []
             }
             response = request.make_json_response(error_response, status=500)
-            response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGIN
+            response.headers['Access-Control-Allow-Origin'] = allowed_origin()
             return response
 
 class MasterCouponPATCH(http.Controller):
@@ -3827,6 +3842,7 @@ class TsOutAPI(http.Controller):
                     'create_date': str(create_date_jakarta),
                     'scheduled_date': str(order.scheduled_date),
                     'date_done': str(order.date_done),
+                    'note': html2plaintext(order.note or '').strip(),
                     'state': order.state
                 }
                 data_transit_out.append(order_data)
@@ -3989,6 +4005,7 @@ class TsInAPI(http.Controller):
                     'create_date': str(create_date_jakarta),
                     'scheduled_date': str(order.scheduled_date),
                     'date_done': str(order.date_done),
+                    'note': html2plaintext(order.note or '').strip(),
                     'state': order.state
                 }
                 data_transit_in.append(order_data)

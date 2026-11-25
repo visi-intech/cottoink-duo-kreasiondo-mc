@@ -2094,6 +2094,9 @@ class DataTransaksi:
                         'origin': record.get('origin', False),
                         # 'is_integrated': True,
                         'vit_trxid': record.get('name', False),
+                        # nomor TS Out di MC harus sama dengan Store; note ikut dibawa
+                        'name': record.get('name', False),
+                        'note': record.get('note', False),
                         'move_ids_without_package': tsout_transfer_inventory_line_ids,
                     }
 
@@ -2136,6 +2139,7 @@ class DataTransaksi:
                         'location_dest_id': int(target_location),
                         'origin': record.get('name', False),
                         'picking_type_id': picking_type_id_ts_in,
+                        'note': record.get('note', False),
                         'move_ids_without_package': tsin_transfer_inventory_line_ids,
                     }
 
@@ -3778,7 +3782,7 @@ class DataTransaksi:
                 ['write_date', '>=', date_from],
                 ['write_date', '<=', date_to],
             ]],
-            {'fields': ['name', 'partner_id', 'location_id', 'picking_type_id', 'location_dest_id', 'scheduled_date', 'date_done', 'origin', 'vit_trxid', 'move_ids_without_package']}
+            {'fields': ['name', 'partner_id', 'location_id', 'picking_type_id', 'location_dest_id', 'scheduled_date', 'date_done', 'origin', 'vit_trxid', 'note', 'move_ids_without_package']}
         )
 
         # Check if any TS In records are found
@@ -3809,6 +3813,14 @@ class DataTransaksi:
                         ts_in_id = ts_in['id']
                         try:
                             start_time = time.time()
+                            if ts.get('note'):
+                                # note TS In dari POSVIT (Store) dibawa ke dokumen TS In di MC, lalu ke SAP
+                                self.target_client.call_odoo(
+                                    'object', 'execute_kw',
+                                    self.target_client.db, self.target_client.uid, self.target_client.password,
+                                    'stock.picking', 'write',
+                                    [[ts_in_id], {'note': ts['note']}]
+                                )
                             self.target_client.call_odoo(
                                 'object', 'execute_kw',
                                 self.target_client.db, self.target_client.uid, self.target_client.password,
