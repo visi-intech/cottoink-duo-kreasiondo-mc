@@ -1735,7 +1735,9 @@ class DataTransaksi:
             transaksi_posorder_session = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                                     self.source_client.uid, self.source_client.password,
                                                                     model_name, 'search_read',
-                                                                    [[['state', '=', 'opened']]],
+                                                                    [['|',
+                                                                      ['state', '=', 'opened'],
+                                                                      '&', ['state', '=', 'closed'], ['id_mc', '=', False]]],
                                                                     {'fields': fields})
 
             if not transaksi_posorder_session:
@@ -1777,22 +1779,19 @@ class DataTransaksi:
                 if record['id'] in existing_pos_order_session_dict:
                     return
 
-                cash_register_balance_start = record.get('cash_register_balance_start')
-                cash_register_balance_end_real = record.get('cash_register_balance_end_real')
-
-                # Debugging prints
-                print(f"Cash Register Balance Start: {cash_register_balance_start}")
-                print(f"Cash Register Balance End Real: {cash_register_balance_end_real}")
-
-                # Ensure monetary values are properly handled
-                cash_register_balance_start = float(cash_register_balance_start) if cash_register_balance_start else 0.0
-                cash_register_balance_end_real = float(cash_register_balance_end_real) if cash_register_balance_end_real else 0.0
-
                 config_id = config_source_dict.get(record.get('config_id')[0] if isinstance(record.get('config_id'), list) else record.get('config_id'))
                 user_id = user_source_dict.get(record.get('user_id')[0] if isinstance(record.get('user_id'), list) else record.get('user_id'))
 
                 if config_id is None or user_id is None:
-                    print(f"Data tidak lengkap untuk transaksi dengan ID {record.get('id')}. Tidak membuat dokumen.")
+                    message_exception = (f"Data tidak lengkap untuk sesi {record.get('name')} (ID {record.get('id')}): "
+                                         f"config id_mc={config_id}, user id_mc={user_id}. Tidak membuat dokumen.")
+                    print(message_exception)
+                    try:
+                        write_date = self.get_write_date(model_name, record['id'])
+                        self.set_log_mc.create_log_note_failed(record, 'POS Session', message_exception, write_date)
+                        self.set_log_ss.create_log_note_failed(record, 'POS Session', message_exception, write_date)
+                    except Exception as log_err:
+                        print(f"Gagal menulis log note [POS Session]: {log_err}")
                     return
 
                 pos_session_data = {
@@ -1801,8 +1800,6 @@ class DataTransaksi:
                     'user_id': 2,
                     'start_at': record.get('start_at'),
                     'stop_at': record.get('stop_at'),
-                    'cash_register_balance_start': cash_register_balance_start,
-                    'cash_register_balance_end_real': cash_register_balance_end_real,
                     'state': record.get('state'),
                 }
 
@@ -1813,25 +1810,29 @@ class DataTransaksi:
                                                                             'pos.session', 'create',
                                                                             [pos_session_data])
                     print(f"Pos Order Session baru telah dibuat dengan ID: {new_session_pos_order_id}")
-                    
+
                     self.source_client.call_odoo(
                         'object', 'execute_kw', self.source_client.db,
                         self.source_client.uid, self.source_client.password,
                         'pos.session', 'write',
                         [[record['id']], {'id_mc': new_session_pos_order_id}]
                     )
-                    
+
                     end_time = time.time()
                     duration = end_time - start_time
 
-                    # write_date = self.get_write_date(model_name, record['id'])
-                    # self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'POS Session', write_date)
-                    # self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'POS Session', write_date)
+                    write_date = self.get_write_date(model_name, record['id'])
+                    self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'POS Session', write_date)
+                    self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'POS Session', write_date)
 
                 except Exception as e:
-                    message_exception = f"Terjadi kesalahan saat membuat pos order baru: {e}"
-                    # self.set_log_mc.create_log_note_failed(record, 'POS Session', message_exception, write_date)
-                    # self.set_log_ss.create_log_note_failed(record, 'POS Session', message_exception, write_date)
+                    message_exception = f"Terjadi kesalahan saat membuat pos session baru: {e}"
+                    try:
+                        write_date = self.get_write_date(model_name, record['id'])
+                        self.set_log_mc.create_log_note_failed(record, 'POS Session', message_exception, write_date)
+                        self.set_log_ss.create_log_note_failed(record, 'POS Session', message_exception, write_date)
+                    except Exception as log_err:
+                        print(f"Gagal menulis log note [POS Session]: {log_err}")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [executor.submit(process_record, record) for record in transaksi_posorder_session]
@@ -3454,17 +3455,7 @@ class DataTransaksi:
             start_at = sessions.get('start_at')
             stop_at = sessions.get('stop_at')
 
-            cash_register_balance_start = sessions.get('cash_register_balance_start')
-            cash_register_balance_end_real = sessions.get('cash_register_balance_end_real')
             config_id = sessions.get('config_id')
-
-            # Debugging prints
-            print(f"Cash Register Balance Start: {cash_register_balance_start}")
-            print(f"Cash Register Balance End Real: {cash_register_balance_end_real}")
-
-            # Ensure monetary values are properly handled
-            cash_register_balance_start = float(cash_register_balance_start) if cash_register_balance_start else 0.0
-            cash_register_balance_end_real = float(cash_register_balance_end_real) if cash_register_balance_end_real else 0.0
 
             # Convert config_id to int if it's available
             config_id = int(config_id[0]) if isinstance(config_id, list) else int(config_id) if config_id else None
@@ -3494,9 +3485,7 @@ class DataTransaksi:
             update_result = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                         self.target_client.uid, self.target_client.password,
                                                         model_name, 'write',
-                                                        [[session_id], {'state': state, 'start_at': start_at, 'stop_at': stop_at, 
-                                                                        'cash_register_balance_start': cash_register_balance_start, 
-                                                                        'cash_register_balance_end_real': cash_register_balance_end_real, 
+                                                        [[session_id], {'state': state, 'start_at': start_at, 'stop_at': stop_at,
                                                                         'is_updated': True}])
 
             self.source_client.call_odoo(
