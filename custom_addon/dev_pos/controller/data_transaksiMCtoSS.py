@@ -122,7 +122,28 @@ class DataTransaksiMCtoSS:
                 self.set_log_mc.create_log_note_failed(
                     {'name': model}, f'Rekonsiliasi id_mc {model}', message, None)
         except Exception as e:
-            print(f"⚠️ Gagal rekonsiliasi id_mc {model}: {e}")
+            self._log_sync_failed(f'Rekonsiliasi id_mc {model}', f"Gagal rekonsiliasi id_mc {model}: {e}")
+
+    def _log_sync_failed(self, modul, message, record=None, model_name=None):
+        """Catat error sync ke Log Note MC dan Store. Tidak pernah melempar error."""
+        record = record or {'name': modul}
+        message = str(message)
+        print(f"❌ [{modul}] {message}")
+        write_date = None
+        if model_name and record.get('id'):
+            write_date = self.get_write_date(model_name, record['id'])
+        for logger in (self.set_log_mc, self.set_log_ss):
+            try:
+                logger.create_log_note_failed(record, modul, message, write_date)
+            except Exception as log_err:
+                print(f"Gagal menulis log note [{modul}]: {log_err}")
+
+    def _log_future_errors(self, futures, records, modul, model_name):
+        """Error yang lolos dari fungsi thread -> Log Note (sebelumnya hilang tanpa jejak)."""
+        for future, record in zip(futures, records):
+            err = future.exception()
+            if err:
+                self._log_sync_failed(modul, f"Error tak terduga: {err}", record, model_name)
 
     def _not_synced_domain(self):
         """Domain 'store ini belum ada di index_store' (kosong kalau store tidak dikenal)."""
@@ -4042,7 +4063,7 @@ class DataTransaksiMCtoSS:
             payment_method = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                         self.source_client.uid, self.source_client.password,
                                                         model_name, 'search_read',
-                                                        [[['config_ids', '!=', False]]],
+                                                        [[]],
                                                         {'fields': fields})
 
             # Hanya payment method milik store ini (is_store = store ini) atau tanpa store.
@@ -4127,7 +4148,18 @@ class DataTransaksiMCtoSS:
                 )
 
                 source_pos_config_ids = record.get('config_ids', [])
-                target_pos_config_ids = [pos_config_dict.get(pos_config['name']) for pos_config in pos_configs_source if pos_config['id'] in source_pos_config_ids]
+                target_pos_config_ids = [pos_config_dict.get(pos_config['name']) for pos_config in pos_configs_source
+                                         if pos_config['id'] in source_pos_config_ids and pos_config_dict.get(pos_config['name'])]
+
+                if not journal_id:
+                    journal_name = record.get('journal_id')[1] if isinstance(record.get('journal_id'), list) else record.get('journal_id')
+                    message_exception = (f"Payment Method '{record.get('name')}' gagal: journal '{journal_name}' "
+                                         f"belum ada di store (id_mc journal belum terisi). Sync Master PoS Config / journal dulu.")
+                    print(message_exception)
+                    write_date = self.get_write_date(model_name, record['id'])
+                    self.set_log_mc.create_log_note_failed(record, 'Payment Method', message_exception, write_date)
+                    self.set_log_ss.create_log_note_failed(record, 'Payment Method', message_exception, write_date)
+                    return
 
                 # No need to check if journal_id or config_ids_mc is None; just leave them empty if they are not found
                 if record['id'] in existing_payment_method_dict:
@@ -4143,13 +4175,15 @@ class DataTransaksiMCtoSS:
                                                     'split_transactions': record.get('split_transactions') if record.get('split_transactions') else False,}])
                         print(f"id_mc updated for existing Payment Method with ID: {existing_payment_method_dict[record['id']]}")
                     except Exception as e:
-                        print(f"Gagal memperbarui id_mc untuk Payment Method yang ada: {e}")
+                        self._log_sync_failed('Payment Method',
+                                              f"Gagal update Payment Method yang sudah ada di store: {e}",
+                                              record, model_name)
                     return
                 else:
                     is_store = record.get('is_store')
                     is_store_id = is_store[0] if isinstance(is_store, list) else is_store
                     
-                    if is_store_id == setting_config_id:
+                    if not is_store_id or is_store_id == setting_config_id:
                         payment_method_transfer_data = {
                             'name': record.get('name') if record.get('name') else False,
                             'is_online_payment': record.get('is_online_payment') if record.get('is_online_payment') else False,
@@ -4188,8 +4222,9 @@ class DataTransaksiMCtoSS:
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [executor.submit(process_payment_method_record_from_mc, record) for record in payment_method]
                 concurrent.futures.wait(futures)
+            self._log_future_errors(futures, payment_method, 'Payment Method', model_name)
         except Exception as e:
-            print(f"Gagal membuat atau memposting Payment Method di Source baru: {e}")
+            self._log_sync_failed('Payment Method', f"Sync Payment Method gagal: {e}")
 
     def pos_config_from_mc(self, model_name, fields, description, date_from, date_to):
         try:
@@ -4258,7 +4293,9 @@ class DataTransaksiMCtoSS:
                                 )
                                 print(f"id_mc and is_integrated updated for existing PoS Config with ID: {existing_pos_config_dict[record['id']]}")
                         except Exception as e:
-                            print(f"Gagal memperbarui id_mc untuk PoS Config yang ada: {e}")
+                            self._log_sync_failed('PoS Config',
+                                                  f"Gagal update PoS Config yang sudah ada di store: {e}",
+                                                  record, model_name)
                         return
                     else:
                         # Validate if the record's is_store matches the setting_config_id
@@ -4304,12 +4341,13 @@ class DataTransaksiMCtoSS:
 
             # Process records in parallel
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(process_pos_config_record_from_mc, record) 
+                futures = [executor.submit(process_pos_config_record_from_mc, record)
                         for record in pos_config]
                 concurrent.futures.wait(futures)
+            self._log_future_errors(futures, pos_config, 'PoS Config', model_name)
 
         except Exception as e:
-            print(f"Gagal membuat atau memposting Payment Method di Source baru: {e}")
+            self._log_sync_failed('PoS Config', f"Sync PoS Config gagal: {e}")
 
     def journal_account_from_mc(self, model_name, fields, description, date_from, date_to):
         try:
@@ -4463,7 +4501,9 @@ class DataTransaksiMCtoSS:
                             )
                             print(f"id_mc and is_integrated updated for existing Journal with ID: {existing_journal_dict[record['id']]}")
                         except Exception as e:
-                            print(f"Gagal memperbarui id_mc untuk Journal yang ada: {e}")
+                            self._log_sync_failed('Journal',
+                                                  f"Gagal update Journal yang sudah ada di store: {e}",
+                                                  record, model_name)
                         return
                     else:
                         # Get vit_config_server_name from is_store
@@ -4573,9 +4613,10 @@ class DataTransaksiMCtoSS:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                     futures = [executor.submit(process_journal_account, record) for record in batch]
                     concurrent.futures.wait(futures)
+                self._log_future_errors(futures, batch, 'Journal', model_name)
 
         except Exception as e:
-            print(f"Gagal membuat atau memposting Payment Method di Source baru: {e}")
+            self._log_sync_failed('Journal', f"Sync Journal gagal: {e}")
 
     def account_account_from_mc(self, model_name, fields, description, date_from, date_to):
         try:
@@ -4633,7 +4674,9 @@ class DataTransaksiMCtoSS:
                                                         [[record.get('id')],
                                                         {'is_integrated': True}])
                         except Exception as e:
-                            print(f"Gagal memperbarui id_mc untuk COA yang ada: {e}")
+                            self._log_sync_failed('Chart of Account',
+                                                  f"Gagal update COA yang sudah ada di store: {e}",
+                                                  record, model_name)
                         return
                     else:
                         # Create new journal account
@@ -4680,9 +4723,10 @@ class DataTransaksiMCtoSS:
             with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 futures = [executor.submit(process_chart_account, record) for record in chart_account]
                 concurrent.futures.wait(futures)
+            self._log_future_errors(futures, chart_account, 'Chart of Account', model_name)
 
         except Exception as e:
-            print(f"Gagal membuat atau memposting Chart Account di Source baru: {e}")
+            self._log_sync_failed('Chart of Account', f"Sync Chart of Account gagal: {e}")
 
     def debug_taxes(self, model_name, fields, description):
         tax_source = self.source_client.call_odoo(
