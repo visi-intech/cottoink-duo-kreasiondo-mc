@@ -1,15 +1,21 @@
 {
     "odoo_db1a": {
-        "url": "http://pos-store.visi-intech.com/jsonrpc",
-        "db": "odoo17db",
+        "url": "http://172.16.186.3:8069/jsonrpc",
+        "db": "cdk_kokas_testing",
         "username": "admin",
-        "password": "512aa6e896af5461baf959e6479692aa3fd05493"
+        "password": "9edc4913e9c12575a95e5c9e78708c1bf190d9d7"
     },
     "odoo_db1b": {
-        "url": "http://pos-mc.visi-intech.com/jsonrpc",
-        "db": "odoo17db",
+        "url": "http://172.16.186.3:8069/jsonrpc",
+        "db": "cdk_bdg_testing",
         "username": "admin",
-        "password": "76c9dd0dce9d4aec46156e472625099d4245c6ad"
+        "password": "9d51f454ba3442de578f431b3a69d55069ded3bd"
+    },
+    "odoo_db1c": {
+        "url": "http://116.254.101.240:8069/jsonrpc",
+        "db": "cdk_testing_2026",
+        "username": "admin",
+        "password": "dd4ae5119307bd63fd3d888201ad28b61a442f1d"
     },
     "odoo_db1_mc": {
         "url": "https://johann1091-test02-02-13781984.dev.odoo.com/jsonrpc",
