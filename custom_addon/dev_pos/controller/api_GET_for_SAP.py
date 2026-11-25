@@ -245,11 +245,23 @@ class MasterCoupon(http.Controller):
             return response
 
 class MasterCouponPATCH(http.Controller):
+    # Preflight (OPTIONS) ditangani sendiri: CORS bawaan Odoo untuk route type='json'
+    # selalu menjawab "Access-Control-Allow-Methods: POST", sehingga browser menolak PATCH.
     @http.route(
-        ['/api/master_coupon'], 
-        type='json', 
-        auth='none', 
-        methods=['PATCH', 'OPTIONS'],
+        ['/api/master_coupon'],
+        type='http',
+        auth='none',
+        methods=['OPTIONS'],
+        csrf=False,
+    )
+    def update_master_coupon_preflight(self, **kwargs):
+        return cors_response()   # Allow-Methods: GET, POST, PATCH, OPTIONS
+
+    @http.route(
+        ['/api/master_coupon'],
+        type='json',
+        auth='none',
+        methods=['PATCH'],
         csrf=False,
         cors="*"
     )
