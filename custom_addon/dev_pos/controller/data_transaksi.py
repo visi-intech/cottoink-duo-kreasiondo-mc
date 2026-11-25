@@ -3953,7 +3953,8 @@ class DataTransaksi:
                     'start_date': record.get('start_date'),
                     'end_date': record.get('end_date'),
                     'modal': record.get('modal'),
-                    'notes': record.get('vit_notes'),
+                    # Field di MC bernama vit_notes (wajib diisi) -> fallback '-' kalau kosong di store
+                    'vit_notes': record.get('vit_notes') or '-',
                     'line_ids': end_shift_line_ids,
                 }
 
