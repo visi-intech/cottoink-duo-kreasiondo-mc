@@ -11,3 +11,5 @@ class PoSPaymentMethodInherit(models.Model):
     is_updated = fields.Boolean(string="Updated", default=False)
     is_store = fields.Many2one('setting.config', string="Send Store")
     vit_trxid = fields.Char(string="Transaction ID", default=False)
+    mdr = fields.Float(string="MDR", default=0.0, digits=(16, 2),
+                       help="Merchant Discount Rate (biaya potongan bank/EDC) untuk metode pembayaran ini.")
