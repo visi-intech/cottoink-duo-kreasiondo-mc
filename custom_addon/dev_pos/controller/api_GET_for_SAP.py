@@ -37,6 +37,23 @@ def _stock_location_first(location, location_dest):
     return location, location_dest
 
 
+def _pos_order_for_move(move, reference):
+    """POS order milik invoice/credit memo `move`.
+
+    Utamakan link langsung pos.order.account_move. Fallback ke vit_trxid hanya untuk
+    order lama yang belum ter-link, supaya order dengan nama sama tidak tertukar.
+    """
+    PosOrder = request.env['pos.order'].sudo()
+    order = PosOrder.search([('account_move', '=', move.id), ('state', '=', 'invoiced')], limit=1)
+    if not order and reference:
+        order = PosOrder.search([
+            ('vit_trxid', '=', reference),
+            ('state', '=', 'invoiced'),
+            ('account_move', '=', False),
+        ], limit=1)
+    return order
+
+
 def cors_response():
     """Helper untuk buat response kosong dengan header CORS lengkap"""
     response = request.make_response("", headers=[
@@ -522,17 +539,15 @@ class PaymentAPI(http.Controller):
                 if not reference:
                     continue
 
-                # Get POS order details
-                order_pos = request.env['pos.order'].sudo().search([
-                    ('vit_trxid', '=', reference),
-                    ('state', '=', 'invoiced')
-                ], limit=1)
+                # Get POS order details lewat link invoice (pos.order.account_move), bukan nama:
+                # nama order bisa sama (mis. 2x refund dari order yang sama -> "... REFUND").
+                order_pos = _pos_order_for_move(payment, reference)
 
                 if not order_pos:
                     continue
 
-                # Get location details from picking
-                picking = request.env['stock.picking'].sudo().search([
+                # Get location details from picking milik order ini
+                picking = order_pos.picking_ids[:1] or request.env['stock.picking'].sudo().search([
                     ('origin', '=', order_pos.name)
                 ], limit=1)
 
@@ -634,17 +649,15 @@ class PaymentReturnCreditMemoAPI(http.Controller):
                 if not reference:
                     continue
 
-                # Get POS order details
-                order_pos = request.env['pos.order'].sudo().search([
-                    ('vit_trxid', '=', reference),
-                    ('state', '=', 'invoiced')
-                ], limit=1)
+                # Get POS order details lewat link invoice (pos.order.account_move), bukan nama:
+                # nama order bisa sama (mis. 2x refund dari order yang sama -> "... REFUND").
+                order_pos = _pos_order_for_move(credit, reference)
 
                 if not order_pos:
                     continue
 
-                # Get location details from picking
-                picking = request.env['stock.picking'].sudo().search([
+                # Get location details from picking milik order ini
+                picking = order_pos.picking_ids[:1] or request.env['stock.picking'].sudo().search([
                     ('origin', '=', order_pos.name)
                 ], limit=1)
 
