@@ -1978,7 +1978,7 @@ class DataTransaksi:
                                                                 self.source_client.uid, self.source_client.password,
                                                                 'master.warehouse', 'search_read',
                                                                 [[['id', 'in', target_location_ids]]],
-                                                                {'fields': ['id', 'id_mc_location', 'id_mc_transit', 'warehouse_name', 'warehouse_code', 'warehouse_transit'], 'limit': 1})
+                                                                {'fields': ['id', 'id_mc_location', 'id_mc_transit', 'warehouse_name', 'warehouse_code', 'warehouse_transit']})
             target_location_source_dict = {target['id']: target['id_mc_location'] for target in target_location_source}
             transit_location_id_dict = {target['id']: target['id_mc_transit'] for target in target_location_source}
             target_location_name_dict = {target['id']: target['warehouse_name'] for target in target_location_source}
@@ -1987,14 +1987,14 @@ class DataTransaksi:
                                                         self.source_client.uid, self.source_client.password,
                                                         'stock.location', 'search_read',
                                                         [[['id', 'in', location_ids]]],
-                                                        {'fields': ['id', 'id_mc'] , 'limit': 1})
+                                                        {'fields': ['id', 'id_mc']})
             location_source_dict = {location['id']: location['id_mc'] for location in location_source}
 
             picking_type_source = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                             self.source_client.uid, self.source_client.password,
                                                             'stock.picking.type', 'search_read',
                                                             [[['id', 'in', picking_type_ids]]],
-                                                            {'fields': ['id', 'id_mc'] , 'limit': 1})
+                                                            {'fields': ['id', 'id_mc']})
             picking_type_source_dict = {type['id']: type['id_mc'] for type in picking_type_source}
 
             picking_ids = [record['id'] for record in Ts_Out_data_source]
@@ -2133,6 +2133,36 @@ class DataTransaksi:
                         'note': record.get('note', False),
                         'move_ids_without_package': tsout_transfer_inventory_line_ids,
                     }
+
+                    # Nomor Store bisa bentrok dengan dokumen milik MC (sequence TSOT MC sendiri).
+                    same_name = self.target_client.call_odoo(
+                        'object', 'execute_kw', self.target_client.db,
+                        self.target_client.uid, self.target_client.password,
+                        'stock.picking', 'search_read',
+                        [[['name', '=', record.get('name')]]],
+                        {'fields': ['id', 'vit_trxid'], 'limit': 1})
+                    if same_name and same_name[0].get('vit_trxid') == record.get('name'):
+                        # TS Out ini sudah pernah masuk MC -> cukup tandai di Store
+                        step = 'menandai TS Out di Store sebagai integrated'
+                        self.source_client.call_odoo(
+                            'object', 'execute_kw', self.source_client.db,
+                            self.source_client.uid, self.source_client.password,
+                            'stock.picking', 'write',
+                            [[record['id']], {'is_integrated': True, 'vit_trxid': record['name']}])
+                        print(f"TS Out {record.get('name')} sudah ada di MC (ID {same_name[0]['id']}), dilewati.")
+                        return
+                    if same_name:
+                        # Dipakai dokumen lain di MC -> beri prefix kode gudang asal, mis. STKOKAS/TSOT/2026/00001.
+                        # Nomor asli Store tetap tersimpan di vit_trxid.
+                        src_loc = self.target_client.call_odoo(
+                            'object', 'execute_kw', self.target_client.db,
+                            self.target_client.uid, self.target_client.password,
+                            'stock.location', 'read', [[int(location_id)], ['complete_name']])
+                        prefix = (src_loc[0]['complete_name'] or '').split('/')[0] if src_loc else ''
+                        prefix = prefix or (self.source_client.server_name or 'STORE').replace(' ', '')
+                        tsout_transfer_data['name'] = f"{prefix}/{record.get('name')}"
+                        print(f"Nomor {record.get('name')} sudah dipakai di MC, TS Out dibuat sebagai "
+                              f"{tsout_transfer_data['name']}")
 
                     step = 'membuat TS Out di MC'
                     new_tsout_id = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
