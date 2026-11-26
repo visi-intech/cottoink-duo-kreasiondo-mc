@@ -1879,57 +1879,69 @@ class DataTransaksi:
         lot_stock_source_dict = {record['id']: record['complete_name'] for record in lot_stock_source}
         lot_stock_id_dict = {record['id']: record['id'] for record in lot_stock_source}
 
+        def m2o_id(value):
+            return value[0] if isinstance(value, list) else value
+
         # # Kirim data ke target
         for record in transaksi_warehouse:
             warehouse_name = record.get('name', False)
-            warehouse_code = record.get('complete_name', False)
-            
-            existing_master_warehouse = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
-                                                                            self.source_client.uid, self.source_client.password,
-                                                                            'master.warehouse', 'search_read',
-                                                                            [[['warehouse_name', '=', warehouse_name]]],
-                                                                            {'fields': ['id'], 'limit': 1})
-            if not existing_master_warehouse:
-                existing_warehouse = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
-                                                                                self.source_client.uid, self.source_client.password,
-                                                                                'stock.warehouse', 'search_read',
-                                                                                [[['name', '=', warehouse_name]]],
-                                                                                {'fields': ['id'], 'limit': 1})
-                if existing_warehouse:
-                    print(f"Warehouse dengan nama {warehouse_name} sudah ada di master.warehouse.")
-                    continue
+            transit_key = m2o_id(record.get('location_transit'))
+            stock_key = m2o_id(record.get('lot_stock_id'))
 
-                location_id = location_transit_name_dict.get(record.get('location_transit')[0] if isinstance(record.get('location_transit'), list) else record.get('location_transit'), False)
-                lot_transit = location_transit_id_dict.get(record.get('location_transit')[0] if isinstance(record.get('location_transit'), list) else record.get('location_transit'), False)
-                lot_stock_id = lot_stock_source_dict.get(record.get('lot_stock_id')[0] if isinstance(record.get('lot_stock_id'), list) else record.get('lot_stock_id'), False)
-                lot_id = lot_stock_id_dict.get(record.get('lot_stock_id')[0] if isinstance(record.get('lot_stock_id'), list) else record.get('lot_stock_id'), False)
+            warehouse_data = {
+                'warehouse_name': warehouse_name,
+                'warehouse_code': str(lot_stock_source_dict.get(stock_key, False)),
+                'warehouse_transit': str(location_transit_name_dict.get(transit_key, False)),
+                'id_mc_location': str(lot_stock_id_dict.get(stock_key, False)),
+                'id_mc_transit': str(location_transit_id_dict.get(transit_key, False)),
+                # 'warehouse_company': [(6, 0, [1])]  # Many2many relation expects a list of IDs
+            }
 
-                warehouse_data = {
-                    'warehouse_name': warehouse_name,
-                    'warehouse_code': str(lot_stock_id),
-                    'warehouse_transit': str(location_id),
-                    'id_mc_location': str(lot_id),
-                    'id_mc_transit': str(lot_transit),
-                    # 'warehouse_company': [(6, 0, [1])]  # Many2many relation expects a list of IDs
-                }
-                try:
-                    start_time = time.time()
+            write_date = None
+            try:
+                start_time = time.time()
+                existing_master_warehouse = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                                                         self.source_client.uid, self.source_client.password,
+                                                                         'master.warehouse', 'search_read',
+                                                                         [[['warehouse_name', '=', warehouse_name]]],
+                                                                         {'fields': list(warehouse_data), 'limit': 1})
+                if existing_master_warehouse:
+                    # Sudah ada -> update kalau data MC berubah (mis. Transit Location diganti)
+                    existing = existing_master_warehouse[0]
+                    changed = {k: v for k, v in warehouse_data.items() if str(existing.get(k)) != v}
+                    if not changed:
+                        continue
+                    self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                                 self.source_client.uid, self.source_client.password,
+                                                 'master.warehouse', 'write',
+                                                 [[existing['id']], changed])
+                    print(f"Warehouse {warehouse_name} diupdate: {changed}")
+                else:
+                    existing_warehouse = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
+                                                                      self.source_client.uid, self.source_client.password,
+                                                                      'stock.warehouse', 'search_read',
+                                                                      [[['name', '=', warehouse_name]]],
+                                                                      {'fields': ['id'], 'limit': 1})
+                    if existing_warehouse:
+                        print(f"Warehouse dengan nama {warehouse_name} adalah warehouse milik Store, dilewati.")
+                        continue
+
                     new_master_warehouse = self.source_client.call_odoo('object', 'execute_kw', self.source_client.db,
                                                                         self.source_client.uid, self.source_client.password,
                                                                         'master.warehouse', 'create',
                                                                         [warehouse_data])
                     print(f"Warehouse baru telah dibuat dengan ID: {new_master_warehouse}")
 
-                    end_time = time.time()
-                    duration = end_time - start_time
+                end_time = time.time()
+                duration = end_time - start_time
 
-                    write_date = self.get_write_date(model_name, record['id'])
-                    self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'Warehouse UDT', write_date)
-                    self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'Warehouse UDT', write_date)
-                except Exception as e:
-                    message_exception = f"An error occurred while creating warehouse: {e}"
-                    self.set_log_mc.create_log_note_failed(record, 'Warehouse UDT', message_exception, write_date)
-                    self.set_log_ss.create_log_note_failed(record, 'Warehouse UDT', message_exception, write_date)
+                write_date = self.get_write_date(model_name, record['id'])
+                self.set_log_mc.create_log_note_success(record, start_time, end_time, duration, 'Warehouse UDT', write_date)
+                self.set_log_ss.create_log_note_success(record, start_time, end_time, duration, 'Warehouse UDT', write_date)
+            except Exception as e:
+                message_exception = f"An error occurred while creating/updating warehouse: {e}"
+                self.set_log_mc.create_log_note_failed(record, 'Warehouse UDT', message_exception, write_date)
+                self.set_log_ss.create_log_note_failed(record, 'Warehouse UDT', message_exception, write_date)
 
     def transfer_TSOUT_NEW(self, model_name, fields, description, date_from, date_to):
         def log_failed(record, message):
@@ -2134,6 +2146,29 @@ class DataTransaksi:
                         'move_ids_without_package': tsout_transfer_inventory_line_ids,
                     }
 
+                    # Source / Destination Warehouse (vit_transfer_request) = gudang dari lokasi MC:
+                    # Source = gudang Source Location, Destination = gudang Target Location (tujuan akhir).
+                    step = 'mengisi Source/Destination Warehouse'
+                    wh_locations = self.target_client.call_odoo(
+                        'object', 'execute_kw', self.target_client.db,
+                        self.target_client.uid, self.target_client.password,
+                        'stock.location', 'read',
+                        [[int(location_id), int(target_location)], ['warehouse_id']])
+                    wh_by_location = {loc['id']: (loc.get('warehouse_id') or [False])[0] for loc in wh_locations}
+                    source_warehouse_id = wh_by_location.get(int(location_id))
+                    dest_warehouse_id = wh_by_location.get(int(target_location))
+                    missing_wh = [label for label, value in (
+                        ('Source Warehouse', source_warehouse_id),
+                        ('Destination Warehouse', dest_warehouse_id),
+                    ) if not value]
+                    if missing_wh:
+                        log_failed(record, f"{', '.join(missing_wh)} tidak ditemukan: lokasi MC "
+                                           f"(Source Location ID {location_id} / Target Location ID "
+                                           f"{target_location}) belum terhubung ke warehouse.")
+                        return
+                    tsout_transfer_data['vit_warehouse_id'] = source_warehouse_id
+                    tsout_transfer_data['vit_warehouse_dest_id'] = dest_warehouse_id
+
                     # Nomor Store bisa bentrok dengan dokumen milik MC (sequence TSOT MC sendiri).
                     same_name = self.target_client.call_odoo(
                         'object', 'execute_kw', self.target_client.db,
@@ -2186,6 +2221,24 @@ class DataTransaksi:
                         [[record['id']], {'is_integrated': True, 'vit_trxid': record['name']}]
                     )
 
+                    # vit_transfer_request di MC otomatis membuat TS In saat TS Out Done.
+                    # Kalau sudah ada, jangan buat TS In kedua (stok transit bisa diambil dua kali).
+                    start_time = time.time()
+                    step = 'mengecek TS In otomatis di MC'
+                    auto_ts_in = self.target_client.call_odoo(
+                        'object', 'execute_kw', self.target_client.db,
+                        self.target_client.uid, self.target_client.password,
+                        'stock.picking', 'search_read',
+                        [[['transfer_out_id', '=', new_tsout_id], ['state', '!=', 'cancel']]],
+                        {'fields': ['id', 'name'], 'limit': 1})
+                    if auto_ts_in:
+                        print(f"TS In {auto_ts_in[0]['name']} sudah dibuat otomatis dari TS Out ID {new_tsout_id}.")
+                        end_time = time.time()
+                        write_date = self.get_write_date(model_name, record['id'])
+                        self.set_log_mc.create_log_note_success(record, start_time, end_time, end_time - start_time, 'TS Out/TS In', write_date)
+                        self.set_log_ss.create_log_note_success(record, start_time, end_time, end_time - start_time, 'TS Out/TS In', write_date)
+                        return
+
                     picking_type_name_ts_in = 'TS In'
                     picking_types_ts_in = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                     self.target_client.uid, self.target_client.password,
@@ -2207,12 +2260,14 @@ class DataTransaksi:
                         'location_dest_id': int(target_location),
                         'origin': record.get('name', False),
                         'picking_type_id': picking_type_id_ts_in,
+                        'transfer_out_id': new_tsout_id,  # TS Out Reference
+                        'vit_warehouse_id': source_warehouse_id,
+                        'vit_warehouse_dest_id': dest_warehouse_id,
                         'note': record.get('note', False),
                         'move_ids_without_package': tsin_transfer_inventory_line_ids,
                     }
 
                     # print(ts_in_transfer_data)
-                    start_time = time.time()
                     step = 'membuat TS In di MC'
                     new_ts_in_id = self.target_client.call_odoo('object', 'execute_kw', self.target_client.db,
                                                                 self.target_client.uid, self.target_client.password,
