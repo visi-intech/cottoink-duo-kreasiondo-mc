@@ -26,6 +26,7 @@ Modul ini hanya menambah di sisi MC, tidak ada perubahan di POSVIT Store.
         'security/security_groups.xml',
         'security/ir.model.access.csv',
         'data/sequence_transfer_request.xml',
+        'data/transfer_type_data.xml',
         'views/transfer_type_view.xml',
         'views/transfer_menu.xml',
         'views/transfer_request_view.xml',
