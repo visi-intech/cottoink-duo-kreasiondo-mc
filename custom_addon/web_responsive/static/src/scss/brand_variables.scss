@@ -1,0 +1,14 @@
+// Warna brand (tema MC = hijau, sama dengan dev_pos/static/src/css/theme_custom.css).
+//
+// File ini dimuat SEBELUM web/static/src/scss/primary_variables.scss (lihat __manifest__.py,
+// direktif "before"). Di file Odoo semua variabel brand memakai "!default", jadi kalau sudah
+// terdefinisi di sini, variabel turunannya ($o-action, $o-main-link-color,
+// $o-input-border-required, $o-navbar-background, $o-navbar-border-bottom, ...) ikut
+// memakai warna ini. Kalau baru ditimpa SESUDAH file Odoo, turunannya tetap ungu.
+//
+// Untuk Store: ganti $vit-brand-color jadi #2596be.
+$vit-brand-color: #8dc63f;
+
+$o-community-color: $vit-brand-color;
+$o-brand-odoo: $vit-brand-color;
+$o-brand-primary: $vit-brand-color;

@@ -23,7 +23,7 @@ jobs:
       ODOO_SERVICE: 'odoo-server-17.0'
       ODOO_DB: 'cdk_testing_2026'
       # Odoo hanya meng-upgrade modul yang sudah ter-install, yang belum di-skip
-      MODULES: 'dev_pos,report_pos,vit_transfer_request,stock_no_negative,pos_session_sequence'
+      MODULES: 'dev_pos,report_pos,vit_transfer_request,stock_no_negative,pos_session_sequence,web_responsive'
 
     steps:
       - name: Checkout
