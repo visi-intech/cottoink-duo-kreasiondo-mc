@@ -1,6 +1,6 @@
 {
     'name': 'VIT Transfer Request MC',
-    'version': '17.0.1.0.1',
+    'version': '17.0.1.0.2',
     'category': 'Inventory',
     'sequence': 1,
     'summary': """Belong to VIT""",
